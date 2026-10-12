@@ -597,7 +597,9 @@ void LimbKinds(Work& work) {
         for (u32 n = 0; n < count; ++n) {
             // Joints only: a Diablo III hardpoint can sit a body's height away
             // (`HP_emit`), and a figure that tall has its hands level with its feet.
-            if (of[n] != f || !work.IsJoint(n)) {
+            // And of those the ones the record names: a portrait's backdrop is
+            // a bone too, six heights overhead.
+            if (of[n] != f || !work.IsJoint(n) || work.rig[n].role == RigRole::None) {
                 continue;
             }
             low = std::min(low, work.point[n].z);

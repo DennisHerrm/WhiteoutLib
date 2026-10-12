@@ -107,9 +107,11 @@ struct SoftRun {
     std::vector<Transform> departures;
     /// Per recorded step, whether any effect asked for anything.
     std::vector<u8> acts;
-    /// The fit over the clip: the worst miss of any step, and the largest move.
+    /// The fit over the clip: the worst miss of any step, the largest move,
+    /// and the mean miss over the area and over the steps an effect asked in.
     f32 worstMiss = 0.0f;
     f32 largestMove = 0.0f;
+    f32 meanMiss = 0.0f;
     /// What its Jiggle did, where one acts in the clip (§8.3).
     bool swings = false;
     SoftJiggleResult swing; ///< Its measures; `swing.swing` is left empty.
@@ -118,7 +120,12 @@ struct SoftRun {
         return step <= steps && lumps != 0 ? departures.data() + static_cast<std::size_t>(step) * lumps : nullptr;
     }
     bool moves() const;
+    /// *Follows within* (§6.6): the mean miss as a share of the largest move.
     f32 follows() const {
+        return largestMove > 1e-12f ? meanMiss / largestMove : 0.0f;
+    }
+    /// The same of the one point that misses by the most.
+    f32 worst() const {
         return largestMove > 1e-12f ? worstMiss / largestMove : 0.0f;
     }
 };

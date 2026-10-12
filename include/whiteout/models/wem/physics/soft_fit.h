@@ -31,6 +31,23 @@
  * It is a function of the goal alone: it starts from the linear solve, never
  * from the step before, so a scrub gives what a play gives.
  *
+ * **The miss is not all the fit is asked.** A point is drawn by the blend of
+ * its lumps' matrices, its normal with it, and the least squares see only
+ * where it lands: two lumps may turn and scale far apart and land it well, and
+ * a lump that holds its points by a tenth is sent ten times as far as the miss
+ * it mends. Either shades the point wrong, and differently every frame. So:
+ *
+ * - the lumps a point rides are asked to turn and scale **alike**, by how
+ *   much each holds it. One matrix for the whole body costs nothing;
+ * - a lump its points hold weakly is asked **alone** as well, by what its hold
+ *   lacks of a fifth: to take those points where they are asked, as if it had
+ *   them whole. A goal one matrix carries is met as before.
+ *
+ * Both are in the matrix the bind gives. *Alike* is asked of what each lump
+ * does past its carrier, so a pose that turns two carriers apart changes it:
+ * the difference is added where the matrix is applied, and the factored one
+ * stays the bind's.
+ *
  * No lump has a stiffness of its own: every lump is pulled toward its carrier
  * by the same small share of its own points' weight, which only settles a
  * lump whose points are few or lie in a line.
@@ -69,9 +86,14 @@ struct SoftFitReport {
     f32 largestMove = 0.0f; ///< The farthest the goal has any point from where its skin carries it.
     f32 worstMiss = 0.0f;   ///< The farthest any point lands from its goal.
     f32 meanMiss = 0.0f;    ///< Over the area.
-    /// *Follows within* (§6.6): the worst miss as a share of the largest move.
+    /// The worst miss as a share of the largest move: one point's, so it says
+    /// where the lumps fail and little of how the whole follows.
     f32 follows() const {
         return largestMove > 1e-12f ? worstMiss / largestMove : 0.0f;
+    }
+    /// *Follows within* (§6.6): the mean miss as a share of the largest move.
+    f32 mean() const {
+        return largestMove > 1e-12f ? meanMiss / largestMove : 0.0f;
     }
 };
 
@@ -160,8 +182,10 @@ private:
     std::vector<u32> blockStart_;
     std::vector<u32> blockLump_;
     std::vector<std::array<f64, 16>> blocks_;
+    std::vector<f64> alike_; ///< Per block of two lumps, how dear it is for them to turn or scale apart.
     std::vector<f64> factor_;
     std::vector<f64> pull_; ///< Per row, the pull toward the carrier.
+    std::vector<f64> alone_; ///< Per lump, the share of what it is asked alone.
     /// The same problem for where the lumps stand alone, one row a lump, factored.
     std::vector<f64> standing_;
     bool factored_ = false;

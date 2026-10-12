@@ -317,6 +317,7 @@ SoftPass RunSoftPass(Document& document, u32 clipIndex, u32 steps, f32 dt, f32 t
             BakeReport::SoftLine line;
             line.body = body.id;
             line.follows = run.follows();
+            line.worst = run.worst();
             line.push = run.swings ? run.swing.over : 0.0f;
             line.atEnd = run.swings ? run.swing.atEnd : 0.0f;
             // Each lump's three tracks, as the keys will play them: what the

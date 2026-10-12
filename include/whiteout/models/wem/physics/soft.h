@@ -54,6 +54,7 @@ const char* ToString(SoftLumpKind kind);
 
 /// The direction an effect moves a point in (§8.1): along the surface's
 /// normal, or away from the bones, which is every lump scaling about its pivot.
+/// (Under a Ripple a lump of the surface moves out with the wave instead, §8.9.)
 enum class SoftAlong : u8 { Surface, Bones, Count };
 
 const char* ToString(SoftAlong along);

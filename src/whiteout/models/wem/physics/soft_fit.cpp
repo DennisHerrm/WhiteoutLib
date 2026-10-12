@@ -23,6 +23,14 @@ using softdetail::Mat3;
 /// same for every lump, and only enough to settle one whose points are few or
 /// lie in a line. A goal the lumps can meet is missed by about this share.
 constexpr f64 kPull = 1e-6;
+/// How dear it is for two lumps of a point to turn or scale apart: as if the
+/// point were moved by their difference over a length, whose square is this
+/// share of the area a lump has. A seventh of a lump's width, about.
+constexpr f64 kAlike = 0.02;
+/// A lump counts as held by its points by this much at the least (the mean of
+/// its lanes' weights, by those weights): under it, it is asked alone for the
+/// rest, and is sent five times as far as a miss at the most.
+constexpr f64 kLeastHold = 0.2;
 constexpr f64 kLeastScale = 0.05;
 constexpr f64 kMostScale = 20.0;
 /// Gauss-Newton steps after the linear solve, and what ends them early.
@@ -174,6 +182,26 @@ SoftRig::SoftRig(const Model& model, u32 body) {
         free_[k] = static_cast<u8>((scales ? 1 : 0) | (moves ? 2 : 0));
     }
 
+    // A lump its points hold weakly is asked alone as well, by what its hold
+    // lacks: to take those points where they are asked, as if it had them
+    // whole. Its hold is the mean of its lanes' weights, by those weights.
+    alone_.assign(lumps.size(), 0.0);
+    {
+        std::vector<f64> once(lumps.size(), 0.0), twice(lumps.size(), 0.0);
+        for (u32 p = 0; p < count; ++p) {
+            const f64 area = std::max(static_cast<f64>(points_.points[p].area), 1e-12);
+            for (const SoftSlot& slot : slotsOf(p)) {
+                if (slot.lump != kInvalidIndex) {
+                    once[slot.lump] += area * slot.weight;
+                    twice[slot.lump] += area * slot.weight * slot.weight;
+                }
+            }
+        }
+        for (std::size_t k = 0; k < lumps.size(); ++k) {
+            alone_[k] = once[k] > 0.0 ? std::max(0.0, kLeastHold - twice[k] / once[k]) : 0.0;
+        }
+    }
+
     // The linear problem: each lump's posed matrix, as `[q, 1] * Y` with `q`
     // a point's offset from the lump's pivot at the bind. Its matrix holds the
     // lanes and the bind positions and nothing of the pose.
@@ -182,6 +210,9 @@ SoftRig::SoftRig(const Model& model, u32 body) {
         return;
     }
     std::map<u64, std::array<f64, 16>> shared;
+    // The area a lump has, were they shared out evenly: the square of a length.
+    const f64 patch = static_cast<f64>(points_.area) / static_cast<f64>(lumps.size());
+    std::map<u64, f64> apart;
     for (u32 p = 0; p < count; ++p) {
         const SoftPoint& point = points_.points[p];
         const f64 area = std::max(static_cast<f64>(point.area), 1e-12);
@@ -201,9 +232,22 @@ SoftRig::SoftRig(const Model& model, u32 body) {
         for (u32 a = 0; a < used; ++a) {
             for (u32 b = 0; b < used; ++b) {
                 std::array<f64, 16>& block = shared[(static_cast<u64>(of[a]) << 32) | of[b]];
+                // Alone, a lane counts by its weight and not by its square.
+                const f64 both = a == b && feature[a][3] > 0.0 ? 1.0 + alone_[of[a]] / feature[a][3] : 1.0;
                 for (int i = 0; i < 4; ++i) {
                     for (int j = 0; j < 4; ++j) {
-                        block[i * 4 + j] += area * feature[a][i] * feature[b][j];
+                        block[i * 4 + j] += area * feature[a][i] * feature[b][j] * both;
+                    }
+                }
+                // Two lumps of the point turn and scale alike: the three rows
+                // of each that are not where it stands, one less the other.
+                if (of[a] != of[b]) {
+                    const f64 alike = kAlike * patch * area * feature[a][3] * feature[b][3];
+                    apart[(static_cast<u64>(of[a]) << 32) | of[b]] += alike;
+                    std::array<f64, 16>& own = shared[(static_cast<u64>(of[a]) << 32) | of[a]];
+                    for (std::size_t i = 0; i < 3; ++i) {
+                        own[i * 4 + i] += alike;
+                        block[i * 4 + i] -= alike;
                     }
                 }
             }
@@ -214,6 +258,8 @@ SoftRig::SoftRig(const Model& model, u32 body) {
         ++blockStart_[(key >> 32) + 1];
         blockLump_.push_back(static_cast<u32>(key & 0xFFFFFFFFu));
         blocks_.push_back(block);
+        const auto pair = apart.find(key);
+        alike_.push_back(pair != apart.end() ? pair->second : 0.0);
     }
     for (std::size_t k = 0; k < lumps.size(); ++k) {
         blockStart_[k + 1] += blockStart_[k];
@@ -418,9 +464,11 @@ SoftFitReport SoftRig::fit(std::span<const Matrix44f> skin, std::span<const Vect
             const std::array<f64, 4> feature{slot.weight * (static_cast<f64>(point.at.x) - pivot.x),
                                              slot.weight * (static_cast<f64>(point.at.y) - pivot.y),
                                              slot.weight * (static_cast<f64>(point.at.z) - pivot.z), slot.weight};
+            // Together, and alone.
+            const f64 asked = area * (1.0 + alone_[slot.lump]);
             for (int i = 0; i < 4; ++i) {
                 for (int c = 0; c < 3; ++c) {
-                    wanted[(slot.lump * 4 + i) * 3 + c] += area * feature[i] * left[c];
+                    wanted[(slot.lump * 4 + i) * 3 + c] += asked * feature[i] * left[c];
                 }
             }
         }
@@ -430,6 +478,16 @@ SoftFitReport SoftRig::fit(std::span<const Matrix44f> skin, std::span<const Vect
     for (std::size_t k = 0; k < lumpCount; ++k) {
         const Posed y = resting(k);
         std::copy(y.begin(), y.end(), rest.begin() + static_cast<std::ptrdiff_t>(k * 12));
+    }
+    // *Alike* is asked of what each lump does past its carrier, and the blocks
+    // hold it as the bind has it. Whether this pose turns any carrier at all.
+    bool turned = false;
+    for (std::size_t k = 0; k < lumpCount && !turned; ++k) {
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                turned = turned || std::abs(carrier[k][i][j] - (i == j ? 1.0 : 0.0)) > 1e-9;
+            }
+        }
     }
     // The problem's matrix times @p y, with or without the pull.
     const auto apply = [&](const std::vector<f64>& y, std::vector<f64>& out, bool pulled) {
@@ -449,20 +507,45 @@ SoftFitReport SoftRig::fit(std::span<const Matrix44f> skin, std::span<const Vect
                 }
             }
         }
+        // Two lumps' rows, each taken back through its own carrier, in place
+        // of the rows as they are: `B_k^T (B_k y_k - B_l y_l) - (y_k - y_l)`.
+        for (std::size_t k = 0; turned && k < lumpCount; ++k) {
+            for (u32 e = blockStart_[k]; e < blockStart_[k + 1]; ++e) {
+                const std::size_t l = blockLump_[e];
+                if (!(alike_[e] > 0.0) || collapsed[k] != 0 || collapsed[l] != 0) {
+                    continue;
+                }
+                for (int j = 0; j < 3; ++j) {
+                    std::array<f64, 3> differ{0, 0, 0};
+                    for (int i = 0; i < 3; ++i) {
+                        for (int m = 0; m < 3; ++m) {
+                            differ[i] += back[k][i][m] * y[k * 12 + m * 3 + j] - back[l][i][m] * y[l * 12 + m * 3 + j];
+                        }
+                    }
+                    for (int i = 0; i < 3; ++i) {
+                        const f64 through =
+                            back[k][0][i] * differ[0] + back[k][1][i] * differ[1] + back[k][2][i] * differ[2];
+                        const f64 asItIs = y[k * 12 + i * 3 + j] - y[l * 12 + i * 3 + j];
+                        out[k * 12 + i * 3 + j] += alike_[e] * (through - asItIs);
+                    }
+                }
+            }
+        }
         for (std::size_t i = 0; pulled && i < n * 3; ++i) {
             out[i] += pull_[i / 3] * y[i];
         }
     };
 
     // 1. A 3x4 matrix a lump, by the factored solve: the lumps' departure
-    // from rest. Two more passes take out what the pull held back.
+    // from rest. Two more passes take out what the pull held back; where the
+    // pose turns the carriers, four, for what the bind's matrix does not hold.
     std::vector<f64> solved = wanted;
     for (int c = 0; c < 3; ++c) {
         softdetail::CholeskySolve(factor_, n, solved.data() + c, 3);
     }
     {
         std::vector<f64> left, more;
-        for (int pass = 0; pass < 2; ++pass) {
+        for (int pass = 0; pass < (turned ? 4 : 2); ++pass) {
             apply(solved, left, false);
             more.resize(n * 3);
             for (std::size_t i = 0; i < n * 3; ++i) {

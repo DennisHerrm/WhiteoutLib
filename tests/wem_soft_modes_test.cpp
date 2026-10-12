@@ -536,6 +536,50 @@ TEST_CASE("G-S3 a dead stop from ten regions a second", "[wem][soft][modes]") {
     CHECK(rubber > 2.0f * slime);
 }
 
+TEST_CASE("G-S3 what a clip played once ends swinging by is what comes out at its end", "[wem][soft][modes]") {
+    const Figure f = MakeJelly();
+    const SoftRig rig(f.model(), f.model().physics.soft[0].id);
+    const SoftVolume volume = MakeSoftVolume(rig);
+    const f32 size = rig.points().size;
+    SoftJiggle settings;
+    settings.weight = 0.0f;
+    const SoftModes modes = MakeSoftModes(rig, volume, settings);
+    // A dead stop a quarter of a second before the clip ends: it ends swinging.
+    const u32 steps = 60;
+    SoftJiggleDrive drive = Carried(rig, steps, 1.0f / 60.0f, false, [&](f32 t) {
+        Transform out;
+        out.translation = Vector3f{10.0f * size * std::min(t, 0.75f), 0, 0};
+        return out;
+    });
+    const SoftJiggleResult whole = RunSoftJiggle(rig, modes, settings, drive);
+    REQUIRE(whole.atEnd > 0.1f);
+    const std::size_t count = rig.pointCount();
+    const auto offAtEnd = [&](const SoftJiggleResult& result) {
+        const std::vector<Vector3f> posed = PosedAt(f, rig, drive, result, steps);
+        f32 off = 0.0f;
+        for (std::size_t p = 0; p < count; ++p) {
+            off = std::max(off, (posed[p] - drive.driven[steps * count + p]).length());
+        }
+        return off;
+    };
+    CHECK(offAtEnd(whole) > 1e-3f * size);
+    // Its span eased out to nothing over that quarter second: the body ends
+    // where its animation has it, and the measure says so.
+    drive.level.assign(steps + 1, 1.0f);
+    for (u32 i = 45; i <= steps; ++i) {
+        drive.level[i] = static_cast<f32>(steps - i) / 15.0f;
+    }
+    const SoftJiggleResult eased = RunSoftJiggle(rig, modes, settings, drive);
+    CHECK(eased.atEnd == 0.0f);
+    CHECK(offAtEnd(eased) < 1e-6f * size);
+    // Eased half way out, half of it is left.
+    for (u32 i = 45; i <= steps; ++i) {
+        drive.level[i] = 1.0f - 0.5f * static_cast<f32>(i - 45) / 15.0f;
+    }
+    const SoftJiggleResult half = RunSoftJiggle(rig, modes, settings, drive);
+    CHECK(half.atEnd == Approx(0.5f * whole.atEnd).epsilon(1e-4));
+}
+
 TEST_CASE("G-S3 Keep volume stiffens the one direction that changes it", "[wem][soft][modes]") {
     const Figure f = MakeJelly();
     const SoftRig rig(f.model(), f.model().physics.soft[0].id);

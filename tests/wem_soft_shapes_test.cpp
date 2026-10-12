@@ -590,22 +590,79 @@ TEST_CASE("G-S2 a Ripple runs from its place: over the skin, through the body, a
     CHECK(tallest > 0.5f * wave.height);
     CHECK(off < 1e-4f);
 
-    // Along the bones it is a wave of the lumps' scales, each by the height at
-    // it over its own size: met to 1e-5.
-    f.model().physics.soft[0].effects[0].ripple->along = SoftAlong::Bones;
-    const SoftStepper along(f.document, 0, id);
-    SoftStepResult scaled;
-    along.step(Bind(f.model()), SoftClock{clip, 0.5f}, poseAt, scaled);
-    REQUIRE(scaled.moved);
+    // Along the bones it is a wave of the lumps themselves. A bone's lump
+    // scales, by the height at it over its own size, met to 1e-5. A lump of
+    // the surface does not: its pivot is the middle of its patch, and its size
+    // is how thick the body is under it, which a wave is soon higher than. It
+    // moves out by the height.
+    SoftBody& soft = f.model().physics.soft[0];
+    soft.effects[0].ripple->along = SoftAlong::Bones;
     const std::vector<f32> radii = SoftLumpRadii(rig);
-    u32 swelled = 0;
-    for (u32 k = 0; k < rig.lumpCount(); ++k) {
-        const f32 want = rig.scales(k) && radii[k] > 0.0f ? 1.0f + SoftSwellHeight(wave, lumps[k], 0.5f) / radii[k] : 1.0f;
-        CHECK(scaled.departures[k].scale.x == Approx(want).margin(1e-5));
-        CHECK(scaled.departures[k].scale.z == Approx(want).margin(1e-5));
-        swelled += std::abs(want - 1.0f) > 1e-3f ? 1 : 0;
+    {
+        const SoftStepper along(f.document, 0, id);
+        SoftStepResult waved;
+        u32 swelled = 0, raised = 0;
+        f32 farthest = 0.0f;
+        // As the swell runs down the body: over its lumps of the surface, and its bones.
+        for (const f32 seconds : {0.25f, 0.5f, 0.75f, 1.0f, 1.5f}) {
+            along.step(Bind(f.model()), SoftClock{clip, seconds}, poseAt, waved);
+            REQUIRE(waved.moved);
+            CHECK(waved.fit.largestMove == 0.0f); // Nothing is put through the fit.
+            for (u32 p = 0; p < rig.pointCount(); ++p) {
+                farthest = std::max(farthest, (waved.posed[p] - waved.carried[p]).length());
+            }
+            for (u32 k = 0; k < rig.lumpCount(); ++k) {
+                const f32 height = radii[k] > 0.0f ? SoftSwellHeight(wave, lumps[k], seconds) : 0.0f;
+                const Transform& departure = waved.departures[k];
+                if (soft.lumps[k].kind == SoftLumpKind::Surface) {
+                    CHECK(departure.scale.x == Approx(1.0f).margin(1e-6));
+                    CHECK(departure.scale.z == Approx(1.0f).margin(1e-6));
+                    // By the height, or not at all where its points face every way.
+                    const f32 moved = departure.translation.length();
+                    CHECK((moved == Approx(std::abs(height)).margin(1e-5) || moved < 1e-6f));
+                    raised += moved > 1e-3f ? 1 : 0;
+                    continue;
+                }
+                const f32 want =
+                    rig.scales(k) && radii[k] > 0.0f ? 1.0f + std::clamp(height / radii[k], -0.5f, 1.0f) : 1.0f;
+                CHECK(departure.translation.length() < 1e-6f);
+                CHECK(departure.scale.x == Approx(want).margin(1e-5));
+                CHECK(departure.scale.z == Approx(want).margin(1e-5));
+                swelled += std::abs(want - 1.0f) > 1e-3f ? 1 : 0;
+            }
+        }
+        CHECK(swelled > 0u);
+        CHECK(raised > 0u);
+        // So no point goes far past the wave: one of the surface by its
+        // height, one of a bone by that over how near the bone it stands.
+        INFO("farthest " << farthest << " of a wave " << wave.height << " high");
+        CHECK(farthest > 0.5f * tallest);
+        CHECK(farthest < 3.0f * wave.height);
     }
-    CHECK(swelled > 0u);
+    // A wave many times a bone's size is no scale of that bone: to half in a
+    // trough and to twice on a crest, and the surface's lumps by its height
+    // still. Before, a trough took a lump to a twentieth and a crest to twenty
+    // times, and the skin on it with it.
+    soft.effects[0].amount = 1.5f;
+    {
+        const SoftWave high = SoftWaveOf(*soft.effects[0].ripple, soft.effects[0].amount, rig.points().size);
+        const SoftStepper along(f.document, 0, id);
+        SoftStepResult waved;
+        u32 held = 0;
+        for (const f32 seconds : {0.2f, 0.35f, 0.5f, 0.65f}) {
+            along.step(Bind(f.model()), SoftClock{clip, seconds}, poseAt, waved);
+            for (u32 k = 0; k < rig.lumpCount(); ++k) {
+                const Transform& departure = waved.departures[k];
+                for (const f32 scale : {departure.scale.x, departure.scale.y, departure.scale.z}) {
+                    CHECK(scale >= 0.5f - 1e-5f);
+                    CHECK(scale <= 2.0f + 1e-5f);
+                    held += scale < 0.5f + 1e-5f || scale > 2.0f - 1e-5f ? 1 : 0;
+                }
+                CHECK(departure.translation.length() <= high.height * (1.0f + 1e-5f));
+            }
+        }
+        CHECK(held > 0u);
+    }
 }
 
 TEST_CASE("G-S2 a looping Ripple's last frame is its first", "[wem][soft][shapes]") {

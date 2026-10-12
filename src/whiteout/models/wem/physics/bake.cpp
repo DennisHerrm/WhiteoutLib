@@ -341,6 +341,13 @@ u64 Inputs(const Document& document, u32 clip, bool bounds) {
         const u8 unset = 0x5u;
         Hash(hash, std::span<const u8>(&unset, 1));
     }
+    // How a soft body's lumps are fitted is the library's, and a clip baked by
+    // a fit since changed holds keys the tool no longer shows (soft design §7).
+    // Said only of a model with a soft body, so every other key reads as it did.
+    if (!model.physics.soft.empty()) {
+        const u8 fit = 1; // 1: the lumps of a point turn and scale alike (2026-10-12).
+        Hash(hash, std::span<const u8>(&fit, 1));
+    }
     // What a once-played clip's end is matched into, as it stands: a Rebake of
     // it makes this clip out of date (§7.4).
     if (const u32 to = BakeLoops(document.clips[clip]) ? kInvalidIndex : BakeGoesTo(document, clip);

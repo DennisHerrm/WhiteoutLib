@@ -1034,9 +1034,13 @@ SoftJiggleResult RunSoftJiggle(const SoftRig& rig, const SoftModes& modes, const
         for (std::size_t s = 0; s < 2 * m; ++s) {
             state[s] += one * thrownEnd[s];
         }
+        // By the level the clip ends at, as what comes out is: a span eased
+        // out to nothing ends with the body where its animation has it.
+        const f64 ends = level(steps);
         for (std::size_t mode = 0; mode < m && !drive.loops; ++mode) {
             const f64 x = thrownEnd[2 * mode], v = thrownEnd[2 * mode + 1] / omega[mode];
-            out.atEnd = std::max(out.atEnd, static_cast<f32>(one * std::sqrt(x * x + v * v) * modes.span[mode] / limit));
+            out.atEnd =
+                std::max(out.atEnd, static_cast<f32>(ends * one * std::sqrt(x * x + v * v) * modes.span[mode] / limit));
         }
     }
     if (end != nullptr) {

@@ -360,7 +360,8 @@ struct PhysicsBake {
     /// Each soft body the bake carried (EDIT_MODE_SOFTBODY_DESIGN.md §11.2): its
     /// id, how many of its lumps got keys and how many keys, how far its points
     /// are from where a key every step had them (model units), and *follows
-    /// within* over the clip (§6.6).
+    /// within* over the clip (§6.6): the mean miss over the largest move. (The
+    /// worst point's, in a file baked before the mean was what is said.)
     std::vector<u32> softIds;
     std::vector<u32> softLumps;
     std::vector<u32> softKeys;

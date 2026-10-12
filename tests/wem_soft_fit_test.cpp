@@ -261,6 +261,76 @@ TEST_CASE("G-S1b a rigid part's lump never scales, and a lump no point rides sta
     }
 }
 
+TEST_CASE("G-S1b a lump its points hardly hold is not sent far, nor thrown from one moment to the next",
+          "[wem][soft][fit]") {
+    Figure f = MakeTube(Skinned::Rigid, 25, 16);
+    SoftBody& body = SoftenAll(f, 12, true);
+    Mesh& mesh = f.model().meshes[0];
+    // A lump a patch of the wall holds by a twelfth a point: what a bone that
+    // weighs little on its points is, once it is copied.
+    const Vector3f at{1.0f, 0.0f, 2.0f};
+    SoftLump weak = body.lumps[0];
+    weak.kind = SoftLumpKind::Surface;
+    weak.carrier = f.bones[1];
+    weak.node = kInvalidNode;
+    weak.anchor = at;
+    weak.rest = at;
+    body.lumps.push_back(weak);
+    const u32 lane = static_cast<u32>(body.lumps.size()); // A layer names a lump from 1.
+    const std::span<const Vector3f> positions =
+        mesh.attributes.get<Vector3f>(geom::names::kPosition, geom::Domain::Vertex);
+    const std::span<std::array<u32, 4>> lumps = mesh.attributes.getOrCreate<std::array<u32, 4>>(
+        geom::names::kSoftBindLump, geom::Domain::Vertex, geom::AttrType::U32x4);
+    const std::span<std::array<f32, 4>> weights = mesh.attributes.getOrCreate<std::array<f32, 4>>(
+        geom::names::kSoftBindWeight, geom::Domain::Vertex, geom::AttrType::F32x4);
+    u32 held = 0;
+    for (u32 v = 0; v < positions.size() && v < lumps.size(); ++v) {
+        for (std::size_t k = 0; k < 4 && (positions[v] - at).length() < 0.9f; ++k) {
+            if (lumps[v][k] == 0) {
+                lumps[v][k] = lane;
+                weights[v][k] = 1.0f / 12.0f;
+                ++held;
+                break;
+            }
+        }
+    }
+    REQUIRE(held >= 6u);
+    const SoftRig rig(f.model(), body.id);
+    const std::vector<Matrix44f> skin = Bind(f.model());
+    // A wave too short for the lumps: what they miss of it is what a lump is
+    // sent to mend, and the least squares send one held by a twelfth twelve
+    // times as far. Two moments of it, a little apart.
+    f32 turned[2] = {0.0f, 0.0f};
+    for (int moment = 0; moment < 2; ++moment) {
+        const f32 phase = 0.1f * static_cast<f32>(moment);
+        const std::vector<Vector3f> goal = Goal(rig, skin, [&](const Vector3f& p) {
+            return Vector3f{p.x + 0.15f * std::sin(6.2831853f * p.z / 1.5f + phase), p.y, p.z};
+        });
+        for (const SoftFitMethod method : {SoftFitMethod::Fast, SoftFitMethod::Dense}) {
+            std::vector<Transform> departures;
+            const SoftFitReport report = rig.fit(skin, goal, departures, method);
+            const Transform& sent = departures.back();
+            const f32 turn = 2.0f * std::acos(std::min(1.0f, std::abs(sent.rotation.w)));
+            INFO("method " << static_cast<int>(method) << ": moved " << sent.translation.length() << " of "
+                           << report.largestMove << ", turned " << turn << ", scaled " << sent.scale.x << " "
+                           << sent.scale.y << " " << sent.scale.z);
+            // Not farther than its points are asked, about: it was four and a
+            // half times as far, turned by 44 degrees, and flat along one axis.
+            CHECK(sent.translation.length() < 2.0f * report.largestMove);
+            CHECK(turn < 0.5f);
+            CHECK(std::min({sent.scale.x, sent.scale.y, sent.scale.z}) > 0.15f);
+            if (method == SoftFitMethod::Fast) {
+                turned[moment] = turn;
+            }
+        }
+    }
+    // A point is drawn by the blend of its lumps' matrices, its normal with
+    // it: from one moment to the next the lump turns as the wave does. It
+    // went from 44 degrees to 19.
+    INFO("the lump turns by " << turned[0] << " and then " << turned[1]);
+    CHECK(std::abs(turned[1] - turned[0]) < 0.1f);
+}
+
 // ============================================================================
 // G-S2: the fields, and the step that runs them.
 // ============================================================================

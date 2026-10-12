@@ -38,6 +38,10 @@ constexpr f32 kSwing = 8.0f;
 /// The most a Wobble on *Jelly* stretches the body, as a logarithm: to four
 /// times its height.
 constexpr f32 kJellyMost = 1.3862944f;
+/// The most a Ripple said along the bones takes from a bone's lump's scale in
+/// a trough, and adds to it on a crest.
+constexpr f32 kRippleTrough = 0.5f;
+constexpr f32 kRippleCrest = 1.0f;
 
 const SubTrack* AmountTrack(const Document& document, u32 model, u32 clip, u32 body, u32 effect) {
     if (model >= document.models.size() || clip >= document.clips.size()) {
@@ -1488,8 +1492,11 @@ void SoftStepper::step(std::span<const Matrix44f> skin, const SoftClock& clock, 
         out.moved = true;
     }
 
-    // A Ripple said along the bones is a wave of the lumps' scales: each by the
-    // wave's height at it, over its own size (§8.9).
+    // A Ripple said along the bones is a wave of the lumps themselves (§8.9). A
+    // bone's lump scales about the bone, by the wave's height at it over its
+    // own size. A lump of the surface stands in the middle of its patch, where
+    // a scale would spread the patch and raise nothing: it moves out by the
+    // wave's height, which a bone carries as exactly.
     for (const SoftEffect& effect : body.effects) {
         if (!effect.enabled || (drivingOnly && !effect.drivesJiggle) || effect.kind != SoftEffectKind::Ripple ||
             !effect.ripple || effect.ripple->along != SoftAlong::Bones) {
@@ -1503,11 +1510,22 @@ void SoftStepper::step(std::span<const Matrix44f> skin, const SoftClock& clock, 
             continue;
         }
         for (std::size_t k = 0; k < lumpCount; ++k) {
-            if (!rig_.scales(static_cast<u32>(k)) || !(lumpRadius_[k] > 0.0f)) {
+            const SoftLump& lump = body.lumps[k];
+            if (!(lumpRadius_[k] > 0.0f)) {
                 continue;
             }
             const f32 height = rippleAt(wave, *effect.ripple, since, turns, level, from.lumps[k]);
-            out.departures[k].scale = out.departures[k].scale * std::clamp(1.0f + height / lumpRadius_[k], 0.05f, 20.0f);
+            if (lump.kind == SoftLumpKind::Surface) {
+                // Not a rigid part's, and not one whose points face every way.
+                if (!lump.rigid && rig_.moves(static_cast<u32>(k))) {
+                    out.departures[k].translation = out.departures[k].translation + lumpOut_[k] * height;
+                }
+            } else if (rig_.scales(static_cast<u32>(k))) {
+                // A wave higher than a bone's points stand from it is no scale
+                // of that bone: to half its size in a trough, to twice on a crest.
+                out.departures[k].scale = out.departures[k].scale *
+                                          (1.0f + std::clamp(height / lumpRadius_[k], -kRippleTrough, kRippleCrest));
+            }
         }
         out.moved = true;
     }

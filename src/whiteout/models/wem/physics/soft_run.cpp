@@ -311,6 +311,8 @@ SoftGoalRun RunSoftGoal(const Document& document, u32 model, u32 body, u32 clip,
     const bool meets = !soft.colliders.empty();
     std::vector<Matrix44f> skin;
     SoftStepResult out, driving;
+    f64 missed = 0.0;
+    u32 asked = 0;
     // One pass: nothing here remembers the step before.
     for (u32 i = 0; i <= steps; ++i) {
         if (cancel != nullptr && cancel->load()) {
@@ -325,6 +327,12 @@ SoftGoalRun RunSoftGoal(const Document& document, u32 model, u32 body, u32 clip,
         }
         run.worstMiss = std::max(run.worstMiss, out.fit.worstMiss);
         run.largestMove = std::max(run.largestMove, out.fit.largestMove);
+        if (out.fit.largestMove > 0.0f) {
+            missed += out.fit.meanMiss;
+            ++asked;
+        }
+        // Along the way too: a run stopped early is none, and is not read.
+        run.meanMiss = asked != 0 ? static_cast<f32>(missed / asked) : 0.0f;
         if (!any) {
             continue;
         }

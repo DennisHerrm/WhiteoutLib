@@ -235,13 +235,15 @@ struct BakeReport {
     std::vector<ClothLine> cloths;
     /// Per soft body the bake carried (soft design §11.2): its id, the lumps
     /// that got keys and the keys, how far its points are from where a key
-    /// every step had them, and *follows within* over the clip.
+    /// every step had them, and *follows within* over the clip: the mean, and
+    /// the worst point's.
     struct SoftLine {
         u32 body = 0;
         u32 lumps = 0;
         u32 keys = 0;
         f32 within = 0.0f;
         f32 follows = 0.0f;
+        f32 worst = 0.0f;
         f32 push = 0.0f;  ///< A Jiggle's push over its *Limit*, before the ceiling.
         f32 atEnd = 0.0f; ///< A clip played once: the swing it ends with, over the *Limit*.
     };

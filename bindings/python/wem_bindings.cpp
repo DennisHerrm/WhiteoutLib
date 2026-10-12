@@ -180,10 +180,11 @@ void bind_wem(py::module_& m) {
         .value("SC2", whiteout::models::wem::ProfileId::Sc2, R"doc(StarCraft II (`.m3`, MODL v23–v29).)doc")
         .value("HEROES", whiteout::models::wem::ProfileId::Heroes, R"doc(Heroes of the Storm (`.m3`, MODL v30+ — MADD available).)doc")
         .value("DIABLO3", whiteout::models::wem::ProfileId::Diablo3, R"doc(Diablo III (`.app` / `.acr`).)doc")
+        .value("WC3_DEFINITIVE", whiteout::models::wem::ProfileId::Wc3Definitive, R"doc(Warcraft III, Reforged's file and shading, Definitive Edition art.)doc")
         .value("COUNT", whiteout::models::wem::ProfileId::Count)
     ;
 
-    py::enum_<whiteout::models::wem::Game>(m, "Game", R"doc(The game a profile belongs to. Classic, Reforged and Generic are one game — Generic is drawn as Reforged — and so are StarCraft II and Heroes: what depends on the game (a clip's read rule, the storage policies) follows this, never a profile compared by hand.)doc")
+    py::enum_<whiteout::models::wem::Game>(m, "Game", R"doc(The game a profile belongs to. Classic, Reforged, Definitive and Generic are one game — Generic is drawn as Reforged — and so are StarCraft II and Heroes: what depends on the game (a clip's read rule, the storage policies) follows this, never a profile compared by hand.)doc")
         .value("WARCRAFT", whiteout::models::wem::Game::Warcraft)
         .value("STAR_CRAFT", whiteout::models::wem::Game::StarCraft)
         .value("WOW", whiteout::models::wem::Game::Wow)
@@ -260,7 +261,7 @@ The kind *is* the contract a generic consumer renders by, which is why it discri
 
 Named for the **format**, because that is what a native block is — a record of what the file held. The profile is named for the game. Same split as `D3ModelAdapter` vs `Diablo3Profile`.)doc")
         .value("NONE", whiteout::models::wem::NativeKind::None, R"doc(`Generic` only; the variant must be `monostate`.)doc")
-        .value("MDX", whiteout::models::wem::NativeKind::Mdx, R"doc(`Wc3Classic`, `Wc3Reforged`.)doc")
+        .value("MDX", whiteout::models::wem::NativeKind::Mdx, R"doc(`Wc3Classic`, `Wc3Reforged`, `Wc3Definitive`.)doc")
         .value("M2", whiteout::models::wem::NativeKind::M2, R"doc(`Wow`.)doc")
         .value("M3", whiteout::models::wem::NativeKind::M3, R"doc(`Sc2`, `Heroes`.)doc")
         .value("D3", whiteout::models::wem::NativeKind::D3, R"doc(`Diablo3`.)doc")

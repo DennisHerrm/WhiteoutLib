@@ -85,6 +85,7 @@ EMSCRIPTEN_BINDINGS(wem) {
         .value("Sc2", whiteout::models::wem::ProfileId::Sc2)
         .value("Heroes", whiteout::models::wem::ProfileId::Heroes)
         .value("Diablo3", whiteout::models::wem::ProfileId::Diablo3)
+        .value("Wc3Definitive", whiteout::models::wem::ProfileId::Wc3Definitive)
         .value("Count", whiteout::models::wem::ProfileId::Count);
 
     enum_<whiteout::models::wem::Game>("WemGame")

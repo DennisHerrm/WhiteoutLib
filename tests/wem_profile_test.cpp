@@ -12,10 +12,10 @@
 using namespace whiteout;
 using namespace whiteout::models;
 
-TEST_CASE("wem profile registry covers all seven profiles", "[wem][profile]") {
+TEST_CASE("wem profile registry covers all eight profiles", "[wem][profile]") {
     const auto all = wem::AllProfileDescs();
     REQUIRE(all.size() == static_cast<std::size_t>(wem::ProfileId::Count));
-    REQUIRE(all.size() == 7);
+    REQUIRE(all.size() == 8);
 
     for (std::size_t i = 0; i < all.size(); ++i) {
         const auto id = static_cast<wem::ProfileId>(i);
@@ -38,6 +38,7 @@ TEST_CASE("wem profile names and format ids", "[wem][profile]") {
     CHECK(std::string(wem::Profile(wem::ProfileId::Generic).name) == "generic");
     CHECK(std::string(wem::Profile(wem::ProfileId::Wc3Classic).name) == "wc3_classic");
     CHECK(std::string(wem::Profile(wem::ProfileId::Wc3Reforged).name) == "wc3_reforged");
+    CHECK(std::string(wem::Profile(wem::ProfileId::Wc3Definitive).name) == "wc3_definitive");
     CHECK(std::string(wem::Profile(wem::ProfileId::Wow).name) == "wow");
     CHECK(std::string(wem::Profile(wem::ProfileId::Sc2).name) == "sc2");
     CHECK(std::string(wem::Profile(wem::ProfileId::Heroes).name) == "heroes");

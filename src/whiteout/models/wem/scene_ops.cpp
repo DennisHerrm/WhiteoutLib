@@ -875,11 +875,18 @@ MergeResult MergeModel(Document& into, u32 model, Document donor, u32 from, cons
     {
         Model& merged = donor.models.front();
         const auto sourceFor = [&](ProfileId to) {
-            const ProfileId sibling = to == ProfileId::Wc3Classic    ? ProfileId::Wc3Reforged
-                                      : to == ProfileId::Wc3Reforged ? ProfileId::Wc3Classic
-                                                                     : ProfileId::Count;
-            if (sibling != ProfileId::Count && merged.setFor(sibling)) {
-                return sibling;
+            // Another Warcraft III set, the one of its own shading first: that
+            // derive is a copy.
+            if (IsWc3(to)) {
+                for (const bool same : {true, false}) {
+                    for (const ProfileId sibling : {ProfileId::Wc3Reforged, ProfileId::Wc3Definitive,
+                                                    ProfileId::Wc3Classic}) {
+                        if (sibling != to && SameShading(sibling, to) == same &&
+                            merged.setFor(sibling)) {
+                            return sibling;
+                        }
+                    }
+                }
             }
             if (merged.setFor(donor.defaultProfile)) {
                 return donor.defaultProfile;

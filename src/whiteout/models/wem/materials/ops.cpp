@@ -646,7 +646,7 @@ void forEachTextureReferencer(DocumentT& document, F&& f) {
             const ProfileId profile = channel.target.material.profile;
             if (channel.target.kind != TrackTarget::Kind::MaterialLayer ||
                 LayerTextureSlot(channel.target.channel) == kInvalidIndex ||
-                (profile != ProfileId::Wc3Classic && profile != ProfileId::Wc3Reforged) ||
+                !IsWc3(profile) ||
                 channel.valueType != geom::AttrType::U32) {
                 continue;
             }

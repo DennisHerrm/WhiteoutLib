@@ -9,6 +9,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <whiteout/models/wem/reflect_bytes.h>
 #include <whiteout/models/wem/retarget.h>
 #include <whiteout/models/wem/validate.h>
 
@@ -406,6 +407,110 @@ TEST_CASE("wem deriving twice refreshes rather than accumulates", "[wem][derive]
     REQUIRE(DeriveProfile(document, ProfileId::Sc2, ProfileId::Diablo3).ok);
     CHECK(document.models[0].profileSets.size() == 2u);
     CHECK(document.profiles.size() == 2u);
+}
+
+// ============================================================================
+// One shading, two names: Reforged and Definitive
+// ============================================================================
+
+namespace {
+
+/// A Reforged document whose one material is SD content with a block of its
+/// own, animated by one material channel: everything a derive into PBR loses.
+Document makeReforgedSd() {
+    Document document =
+        documentWith(ProfileId::Wc3Reforged, {makeComposite("sd", 1), makeComposite("trim")});
+    Model& model = document.models[0];
+    model.profileSets[0].materials[0].SetNativeAuthoritative(native::MdxMaterial{});
+    AnimChannel channel;
+    channel.id = model.animChannels.nextFreeId();
+    channel.target.kind = TrackTarget::Kind::MaterialLayer;
+    channel.target.material.profile = ProfileId::Wc3Reforged;
+    channel.target.material.slot = 0;
+    channel.target.sub = 0;
+    model.animChannels.add(channel);
+    Clip clip;
+    clip.model = 0;
+    SubTrack track;
+    track.channel = channel.id;
+    clip.containers.emplace_back().subTracks.push_back(track);
+    document.clips.push_back(std::move(clip));
+    return document;
+}
+
+} // namespace
+
+TEST_CASE("wem a derive between Reforged and Definitive is a copy", "[wem][derive]") {
+    CHECK(SameShading(ProfileId::Wc3Reforged, ProfileId::Wc3Definitive));
+    CHECK_FALSE(SameShading(ProfileId::Wc3Classic, ProfileId::Wc3Definitive));
+    CHECK(IsWc3Hd(ProfileId::Wc3Definitive));
+    CHECK(IsWc3(ProfileId::Wc3Definitive));
+    CHECK_FALSE(IsWc3Hd(ProfileId::Wc3Classic));
+
+    Document document = makeReforgedSd();
+    const DeriveResult result =
+        DeriveProfile(document, ProfileId::Wc3Reforged, ProfileId::Wc3Definitive);
+    REQUIRE(result.ok);
+    // Nothing converted: into any other PBR profile this stack would fold.
+    CHECK(codes(result.diagnostics) == "");
+
+    const Model& model = document.models[0];
+    const Material* source = Resolve(model, 0, ProfileId::Wc3Reforged);
+    const Material* copy = Resolve(model, 0, ProfileId::Wc3Definitive);
+    REQUIRE(source != nullptr);
+    REQUIRE(copy != nullptr);
+    CHECK(copy->Common().kind() == MaterialKind::Composite);
+    CHECK(copy->Common().composite()->layers.size() == source->Common().composite()->layers.size());
+    CHECK(copy->nativeKind() == NativeKind::Mdx);
+    CHECK(document.carries(ProfileId::Wc3Definitive));
+    CHECK(document.carries(ProfileId::Wc3Reforged));
+
+    // The channel has a twin, and its keys went with it.
+    u32 twins = 0;
+    for (const AnimChannel& channel : model.animChannels.channels) {
+        twins += channel.target.material.profile == ProfileId::Wc3Definitive ? 1u : 0u;
+    }
+    CHECK(twins == 1u);
+    CHECK(document.clips[0].containers[0].subTracks.size() == 2u);
+    for (const MeshSection& section : model.meshes[0].sections) {
+        CHECK(HasProfile(section.profiles, ProfileId::Wc3Reforged) ==
+              HasProfile(section.profiles, ProfileId::Wc3Definitive));
+    }
+}
+
+TEST_CASE("wem a Reforged set is renamed Definitive in place", "[wem][derive]") {
+    Document document = makeReforgedSd();
+    Model& model = document.models[0];
+    model.meshes[0].sections[0].profiles = ProfileBit(ProfileId::Wc3Reforged);
+    model.meshes[0].sections[1].profiles = kAllProfiles;
+    const u32 channel = model.animChannels.channels[0].id;
+    const Document original = document;
+
+    REQUIRE(RenameProfile(document, ProfileId::Wc3Reforged, ProfileId::Wc3Definitive));
+    CHECK(document.profiles == std::vector<ProfileId>{ProfileId::Wc3Definitive});
+    CHECK(document.defaultProfile == ProfileId::Wc3Definitive);
+    REQUIRE(model.profileSets.size() == 1u);
+    CHECK(model.profileSets[0].profile == ProfileId::Wc3Definitive);
+    CHECK(model.profileSets[0].materials[0].Common().kind() == MaterialKind::Composite);
+    CHECK(model.meshes[0].sections[0].profiles == ProfileBit(ProfileId::Wc3Definitive));
+    // A mask that names every profile still does.
+    CHECK(model.meshes[0].sections[1].profiles == kAllProfiles);
+    // The same channel, so its keys need no move.
+    REQUIRE(model.animChannels.channels.size() == 1u);
+    CHECK(model.animChannels.channels[0].id == channel);
+    CHECK(model.animChannels.channels[0].target.material.profile == ProfileId::Wc3Definitive);
+    CHECK(errorCodes(Validate(document, ValidateLevel::Structural)) == "");
+
+    // Renaming back is the inverse.
+    Document back = document;
+    REQUIRE(RenameProfile(back, ProfileId::Wc3Definitive, ProfileId::Wc3Reforged));
+    CHECK(SameReflected(back, original));
+
+    // Never across a shading, or onto a set that is there.
+    CHECK_FALSE(RenameProfile(document, ProfileId::Wc3Definitive, ProfileId::Wc3Classic));
+    CHECK_FALSE(RenameProfile(document, ProfileId::Wc3Reforged, ProfileId::Wc3Definitive));
+    REQUIRE(DeriveProfile(document, ProfileId::Wc3Definitive, ProfileId::Wc3Reforged).ok);
+    CHECK_FALSE(RenameProfile(document, ProfileId::Wc3Definitive, ProfileId::Wc3Reforged));
 }
 
 // ============================================================================

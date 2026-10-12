@@ -63,7 +63,12 @@ namespace wem {
 
 namespace {
 
+/// What a file is read as. Nothing in an `.mdx` says Definitive: that is where
+/// its art lives, which the host knows and states with `RenameProfile`.
 constexpr ProfileId kMdxProfiles[] = {ProfileId::Wc3Classic, ProfileId::Wc3Reforged};
+/// What one is written from.
+constexpr ProfileId kMdxServed[] = {ProfileId::Wc3Classic, ProfileId::Wc3Reforged,
+                                    ProfileId::Wc3Definitive};
 
 // A section's geoset-animation leftovers in its native bag, spelled here and
 // nowhere else (`geosetTint` / `setGeosetTint`). Floats are their bit patterns.
@@ -2250,6 +2255,7 @@ u32 MdxFileVersion(ProfileId profile) {
     case ProfileId::Wc3Classic:
         return 800;
     case ProfileId::Wc3Reforged:
+    case ProfileId::Wc3Definitive:
         return 1800;
     default:
         return 0;
@@ -2887,7 +2893,7 @@ Result<mdx::Model> MdxConverter::toMdx(const Document& document, ProfileId profi
     // does not hold is worse than a white one, and it is the same question.
     if (blankMaterial != kInvalidIndex) {
         mdx::Layer layer;
-        if (profile == ProfileId::Wc3Reforged) {
+        if (IsWc3Hd(profile)) {
             layer.shader = mdx::Layer::ShaderType::SDOnHD;
         }
         layer.textureId = context.stockBase + static_cast<u32>(stockTextures.size());
@@ -3069,7 +3075,7 @@ std::string MdxConverter::formatName() const {
 }
 
 std::span<const ProfileId> MdxConverter::profiles() const {
-    return kMdxProfiles;
+    return kMdxServed;
 }
 
 bool MdxConverter::supportsImport() const {
@@ -3197,7 +3203,7 @@ MaterialBlockResult MdxConverter::setMaterialBlock(Document& document,
     Diagnostics& out = result.diagnostics;
     const auto number = [](u64 value) { return std::to_string(value); };
 
-    if (edit.profile != ProfileId::Wc3Classic && edit.profile != ProfileId::Wc3Reforged) {
+    if (!IsWc3(edit.profile)) {
         out.error(DiagCode::OperationUnsupported,
                   std::string("an MDX block edits a Warcraft III set, not ") +
                       ToString(edit.profile),
@@ -3459,7 +3465,7 @@ MaterialBlockDraft MdxConverter::defaultMaterialBlock(Document& document, Profil
     layer.filterMode = mdx::Layer::FilterMode::None;
     layer.textureAnimationId = mdx_core::kNoTextureAnimation;
     layer.coordId = 0;
-    if (profile == ProfileId::Wc3Reforged) {
+    if (IsWc3Hd(profile)) {
         layer.shader = mdx::Layer::ShaderType::HD;
         layer.is_hd = true;
         for (u32 s = 0; s < mdx_core::kHdPositionalSlotCount; ++s) {
@@ -3500,7 +3506,7 @@ MaterialBlockDraft MdxConverter::defaultMaterialBlock(Document& document, Profil
     material.layers.push_back(layer);
     CopyToNative(material, draft.block);
     draft.block.sourceVersion = sourceVersion;
-    draft.block.layers[0].isHd = profile == ProfileId::Wc3Reforged;
+    draft.block.layers[0].isHd = IsWc3Hd(profile);
     return draft;
 }
 

@@ -1204,8 +1204,7 @@ Result<m3::Model> M3Converter::toM3(const Document& document, ProfileId profile,
     //
     // Only for a Warcraft III document: the `.m2` importer sets the same bits
     // with its own semantics, and an `.m3` source carries no NodeFlags at all.
-    const bool warcraftNodes = document.defaultProfile == ProfileId::Wc3Classic ||
-                               document.defaultProfile == ProfileId::Wc3Reforged;
+    const bool warcraftNodes = IsWc3(document.defaultProfile);
     if (warcraftNodes) {
         constexpr i64 kCameraAnchored = 0x80;
         const auto rotates = [&](u32 n) {
@@ -1519,8 +1518,7 @@ Result<m3::Model> M3Converter::toM3(const Document& document, ProfileId profile,
     // The pass fold's inputs (WC3_SD_MATERIAL_TO_SC2_DESIGN.md §5): whether the
     // stacks are Warcraft III's, what the caller learned about the textures'
     // alpha, and where a composite's section entries may go -- after the slots.
-    context.warcraftPasses = document.defaultProfile == ProfileId::Wc3Classic ||
-                             document.defaultProfile == ProfileId::Wc3Reforged;
+    context.warcraftPasses = IsWc3(document.defaultProfile);
     context.exactPasses = settings.exactPasses;
     if (!settings.textureAlphaClasses.empty()) {
         context.textureAlphaClasses = &settings.textureAlphaClasses;
@@ -1737,8 +1735,7 @@ Result<m3::Model> M3Converter::toM3(const Document& document, ProfileId profile,
         }
         return signature;
     };
-    const bool warcraftMaterials = document.defaultProfile == ProfileId::Wc3Classic ||
-                                   document.defaultProfile == ProfileId::Wc3Reforged;
+    const bool warcraftMaterials = IsWc3(document.defaultProfile);
     std::map<u32, std::string> slotTint;
     std::set<u32> slotTintShared;
     // The material map entry a section draws, where it is not its slot's.
@@ -1911,8 +1908,7 @@ Result<m3::Model> M3Converter::toM3(const Document& document, ProfileId profile,
 
     for (std::size_t m = 0; m < model.meshes.size(); ++m) {
         const Mesh& mesh = model.meshes[m];
-        const bool warcraftDocument = document.defaultProfile == ProfileId::Wc3Classic ||
-                                      document.defaultProfile == ProfileId::Wc3Reforged;
+        const bool warcraftDocument = IsWc3(document.defaultProfile);
         const geom::RenderMesh render = geom::BuildRenderMesh(mesh, desc);
         diagnostics.append(render.diagnostics);
 

@@ -5,6 +5,7 @@
 #include <whiteout/models/wem/materials/surface_flatten.h>
 #include <whiteout/models/wem/nodes/presence.h>
 
+#include <algorithm>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -839,6 +840,10 @@ DeriveResult DeriveProfile(Document& document, ProfileId from, ProfileId to,
     const ProfileDesc& sourceDesc = Profile(from);
     const bool sharedNative = sourceDesc.nativeMaterialKind == targetDesc.nativeMaterialKind &&
                               targetDesc.nativeMaterialKind != NativeKind::None;
+    // One shading under two names (Reforged and Definitive): the set is its
+    // source's, material for material, and nothing below converts or drops.
+    const bool sameShading = from != to && SameShading(from, to);
+    const bool keepsLooks = targetDesc.supportsLooks || sameShading;
 
     // The node tree is shared, so a derive leaves an emitter system where it is;
     // what it can say is which ones the new profile will not run (§10.9).
@@ -880,8 +885,11 @@ DeriveResult DeriveProfile(Document& document, ProfileId from, ProfileId to,
 
         // --- looks ------------------------------------------------------------
         u32 keptLook = 0;
-        if (targetDesc.supportsLooks) {
+        if (keepsLooks) {
             derived.looks = source->looks;
+            if (sameShading) {
+                derived.defaultLook = source->defaultLook;
+            }
         } else {
             const u32 wanted =
                 options.keepLook == kInvalidIndex ? source->defaultLook : options.keepLook;
@@ -902,6 +910,10 @@ DeriveResult DeriveProfile(Document& document, ProfileId from, ProfileId to,
         derived.materials.reserve(source->materials.size());
         for (std::size_t m = 0; m < source->materials.size(); ++m) {
             const Material& sourceMaterial = source->materials[m];
+            if (sameShading) {
+                derived.materials.push_back(sourceMaterial);
+                continue;
+            }
             const ElementRef where(ElementKind::Material, static_cast<u32>(m));
             const KindContext ctx{&result.diagnostics, where, to};
 
@@ -973,7 +985,7 @@ DeriveResult DeriveProfile(Document& document, ProfileId from, ProfileId to,
                 continue;
             }
             const std::vector<u32>& sourceByLook = source->slotBindings[slot].byLook;
-            if (targetDesc.supportsLooks) {
+            if (keepsLooks) {
                 for (std::size_t look = 0; look < byLook.size() && look < sourceByLook.size();
                      ++look) {
                     byLook[look] = sourceByLook[look];
@@ -1070,7 +1082,7 @@ DeriveResult DeriveProfile(Document& document, ProfileId from, ProfileId to,
                 }
                 AnimChannel twin = original;
                 twin.target.material.profile = to;
-                if (!targetDesc.supportsLooks) {
+                if (!keepsLooks) {
                     if (original.target.material.look != keptLook) {
                         // The look it drove is not in this set; `LookDropped`
                         // above already said the look went.
@@ -1164,6 +1176,53 @@ DeriveResult DeriveProfile(Document& document, ProfileId from, ProfileId to,
     document.declare(to);
     result.ok = true;
     return result;
+}
+
+// ============================================================================
+// RenameProfile
+// ============================================================================
+
+bool RenameProfile(Document& document, ProfileId from, ProfileId to) {
+    if (from == to || !SameShading(from, to) || !document.carries(from) || document.carries(to)) {
+        return false;
+    }
+    // The two bits change places, so a mask that names every profile still
+    // does and renaming back is the exact inverse.
+    const ProfileMask fromBit = ProfileBit(from);
+    const ProfileMask toBit = ProfileBit(to);
+    const auto move = [&](ProfileMask& mask) {
+        const bool held = (mask & fromBit) != 0;
+        const bool stale = (mask & toBit) != 0;
+        mask = (mask & ~(fromBit | toBit)) | (held ? toBit : 0u) | (stale ? fromBit : 0u);
+    };
+    for (Model& model : document.models) {
+        // A set left over under the new name would be a second one for it.
+        std::erase_if(model.profileSets,
+                      [&](const ProfileMaterialSet& set) { return set.profile == to; });
+        for (ProfileMaterialSet& set : model.profileSets) {
+            if (set.profile == from) {
+                set.profile = to;
+            }
+        }
+        for (Node& node : model.nodes.nodes) {
+            move(node.profiles);
+        }
+        for (Mesh& mesh : model.meshes) {
+            for (MeshSection& section : mesh.sections) {
+                move(section.profiles);
+            }
+        }
+        for (AnimChannel& channel : model.animChannels.channels) {
+            if (IsMaterialTarget(channel.target.kind) && channel.target.material.profile == from) {
+                channel.target.material.profile = to;
+            }
+        }
+    }
+    std::replace(document.profiles.begin(), document.profiles.end(), from, to);
+    if (document.defaultProfile == from) {
+        document.defaultProfile = to;
+    }
+    return true;
 }
 
 // ============================================================================

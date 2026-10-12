@@ -93,9 +93,24 @@ struct DeriveResult {
  *
  * Fails only when @p from is not carried. Producing a set full of approximations
  * is a success with a report, which is the whole contract.
+ *
+ * Between two profiles of one shading (`SameShading`: Reforged and Definitive)
+ * there is nothing to approximate, and the set is copied whole.
  */
 DeriveResult DeriveProfile(Document& document, ProfileId from, ProfileId to,
                            const RetargetOptions& options = {});
+
+/**
+ * @brief Names @p from's material sets @p to, in place: the sets, the bit on
+ *        every node and section, the material channels and the document's
+ *        declaration and default.
+ *
+ * Only between two profiles of one shading (`SameShading`), where nothing a set
+ * holds depends on which it is: a Reforged model becomes a Definitive one, or
+ * the other way. False, and nothing written, for any other pair, when @p from
+ * is not carried, or when @p to already is.
+ */
+bool RenameProfile(Document& document, ProfileId from, ProfileId to);
 
 // ============================================================================
 // RescaleDocument

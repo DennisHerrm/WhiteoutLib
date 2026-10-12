@@ -42,7 +42,7 @@ namespace wem {
 /// (EDIT_MODE_MATERIALS_DESIGN.md §6.1).
 struct MaterialBlockEdit {
     u32 model = 0;
-    ProfileId profile = ProfileId::Wc3Classic; ///< `Wc3Classic` or `Wc3Reforged`.
+    ProfileId profile = ProfileId::Wc3Classic; ///< A Warcraft III profile (`IsWc3`).
     u32 material = kInvalidIndex;              ///< In that set's `materials`.
     native::MdxMaterial block;                 ///< The whole new block.
     /// Old block layer -> new, `kInvalidIndex` for a removed one. Empty is the

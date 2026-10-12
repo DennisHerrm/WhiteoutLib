@@ -67,12 +67,13 @@ constexpr std::span<const BlendMode> modes(const BlendMode (&a)[N]) {
 }
 
 /// §10.9: the nine shared kinds everywhere, and each emitter system in its own
-/// game alone. Both Warcraft III profiles read the one `.mdx` emitter set and
+/// game alone. The Warcraft III profiles read the one `.mdx` emitter set and
 /// its FaceFX list, and StarCraft II and Heroes the one `.m3` set.
 NodeKindMask nodeKindsOf(ProfileId id) {
     switch (id) {
     case ProfileId::Wc3Classic:
     case ProfileId::Wc3Reforged:
+    case ProfileId::Wc3Definitive:
         return kSharedNodeKinds | kWc3NodeKinds | kWc3FaceKinds;
     case ProfileId::Sc2:
     case ProfileId::Heroes:
@@ -116,7 +117,7 @@ PhysicsCaps physicsOf(ProfileId id) {
 // The registry. Indexed by ProfileId; `kDescs[i].id == ProfileId(i)` is asserted
 // by wem_profile_test.
 //
-// `winding` and `handedness` agree across all seven today — every Blizzard format
+// `winding` and `handedness` agree across all eight today — every Blizzard format
 // is right-handed with CCW front faces, which is why no importer reverses indices
 // and the SC2 rebase (a rotation, §6.4) costs nothing. The fields exist so a
 // format that disagrees is describable, not so a converter has to guess.
@@ -238,6 +239,14 @@ const std::array<ProfileDesc, static_cast<std::size_t>(ProfileId::Count)>& descs
                  2, 0, IndexWidth::U16, false, /*vcolor*/ true, modes(kD3BlendModes),
                  kCombiners | kLegacy, NativeKind::D3, /*looks*/ true,
                  /*actors*/ true, RigConvention::ExplicitBind),
+
+        // Warcraft III, Definitive Edition. Reforged's row under another name:
+        // the art tier its textures are read from is the host's, and nothing
+        // a document holds differs (`SameShading`).
+        makeDesc(ProfileId::Wc3Definitive, "wc3_definitive", "Warcraft III (Definitive Edition)",
+                 "mdx", CoordSpace::Blizzard, 1.0f, 4, 2, 0, IndexWidth::U16, false, false,
+                 modes(kMdxBlendModes), kPbr, NativeKind::Mdx, false, false,
+                 RigConvention::PivotRelative, kCombiners, kComposite | kCombiners),
     }};
     return table;
 }

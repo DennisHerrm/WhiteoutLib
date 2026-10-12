@@ -547,7 +547,7 @@ bool IsSdOnHdLayer(const mdx::Material& material, const Layer& layer, u32 modelV
 bool LayerAllowedIn(const mdx::Material& material, const Layer& layer, u32 modelVersion,
                     ProfileId profile) {
     // A Reforged model uses all four: HD, Crystal, SD on HD and SD.
-    if (profile == ProfileId::Wc3Reforged) {
+    if (IsWc3Hd(profile)) {
         return true;
     }
     // A classic model uses SD alone. From v1100 the layer names its shader, and
@@ -567,7 +567,7 @@ bool HasLayersFor(const mdx::Material& material, ProfileId profile, const Contex
         // A v800 file is an SD model: it declares a Reforged set only for an HD
         // layer, which it never has. From v900 a file is a Reforged-era one, and
         // everything in it is a Reforged model's.
-        if (profile == ProfileId::Wc3Reforged && context.modelVersion <= 800 &&
+        if (IsWc3Hd(profile) && context.modelVersion <= 800 &&
             !IsHdLayer(material, layer, context.modelVersion)) {
             continue;
         }
@@ -621,7 +621,7 @@ Material ImportMaterial(const mdx::Material& material, ProfileId profile, const 
     // slots to fill and takes the classic projection instead.
     std::vector<const Layer*> hdLayers;
     std::vector<std::size_t> hdAt;
-    if (profile == ProfileId::Wc3Reforged) {
+    if (IsWc3Hd(profile)) {
         for (std::size_t i = 0; i < layers.size(); ++i) {
             if (IsHdLayer(material, *layers[i], context.modelVersion)) {
                 hdLayers.push_back(layers[i]);
@@ -1422,7 +1422,7 @@ mdx::Material ExportMaterial(const Material& material, ProfileId profile, const 
     // A Reforged file says SD on HD for its SD layers. Warcraft III draws ids 0
     // and 2 through the same program in either mode (`MatSelect`), so this
     // names what the layer is without changing how it draws.
-    if (profile == ProfileId::Wc3Reforged) {
+    if (IsWc3Hd(profile)) {
         bool anyHd = false;
         for (Layer& layer : dst.layers) {
             if (!layer.is_hd && layer.shader == Layer::ShaderType::SD) {

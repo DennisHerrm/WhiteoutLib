@@ -9,7 +9,7 @@
  *
  * A profile is **the game and its shading generation, never the file format** —
  * the house rule the renderer already follows (`Diablo3Profile` reads `.app` files
- * through `D3ModelAdapter`). Seven profiles, four native block kinds: the profile
+ * through `D3ModelAdapter`). Eight profiles, four native block kinds: the profile
  * axis and the native-record axis are related but not the same size.
  *
  * `ProfileDesc` is pure data in a registry. Nothing here has behaviour, and the
@@ -54,6 +54,8 @@ enum class ProfileId : u32 {
     Sc2 = 4,         ///< StarCraft II (`.m3`, MODL v23–v29).
     Heroes = 5,      ///< Heroes of the Storm (`.m3`, MODL v30+ — MADD available).
     Diablo3 = 6,     ///< Diablo III (`.app` / `.acr`).
+    // Last, because the value is on disk.
+    Wc3Definitive = 7, ///< Warcraft III, Reforged's file and shading, Definitive Edition art.
     Count
 };
 
@@ -71,8 +73,8 @@ constexpr bool HasProfile(ProfileMask mask, ProfileId id) {
 }
 
 /**
- * @brief The game a profile belongs to. Classic, Reforged and Generic are one
- *        game — Generic is drawn as Reforged — and so are StarCraft II and
+ * @brief The game a profile belongs to. Classic, Reforged, Definitive and Generic
+ *        are one game — Generic is drawn as Reforged — and so are StarCraft II and
  *        Heroes: what depends on the game (a clip's read rule, the storage
  *        policies) follows this, never a profile compared by hand.
  */
@@ -90,6 +92,24 @@ constexpr Game GameOf(ProfileId id) {
     default:
         return Game::Warcraft;
     }
+}
+
+/// Warcraft III's HD shading generation: Reforged, and Definitive, which is
+/// Reforged read from another art tier. What depends on the shading or on the
+/// file asks this, never `Wc3Reforged` by name.
+constexpr bool IsWc3Hd(ProfileId id) {
+    return id == ProfileId::Wc3Reforged || id == ProfileId::Wc3Definitive;
+}
+
+/// Any of the three profiles an `.mdx` serves.
+constexpr bool IsWc3(ProfileId id) {
+    return id == ProfileId::Wc3Classic || IsWc3Hd(id);
+}
+
+/// Whether two profiles hold the same materials, so a derive between them is
+/// a copy: a profile and itself, and Reforged and Definitive.
+constexpr bool SameShading(ProfileId a, ProfileId b) {
+    return a == b || (IsWc3Hd(a) && IsWc3Hd(b));
 }
 
 /// Registry name — "generic", "wc3_classic", … The stable spelling.
@@ -235,7 +255,7 @@ const char* ToString(MaterialKind kind);
  */
 enum class NativeKind : u8 {
     None = 0, ///< `Generic` only; the variant must be `monostate`.
-    Mdx = 1,  ///< `Wc3Classic`, `Wc3Reforged`.
+    Mdx = 1,  ///< `Wc3Classic`, `Wc3Reforged`, `Wc3Definitive`.
     M2 = 2,   ///< `Wow`.
     M3 = 3,   ///< `Sc2`, `Heroes`.
     D3 = 4,   ///< `Diablo3`.
@@ -358,7 +378,7 @@ struct ProfileDesc {
 /// The registry entry for a profile. `id` must be < `ProfileId::Count`.
 const ProfileDesc& Profile(ProfileId id);
 
-/// All seven entries, indexed by `ProfileId`.
+/// Every entry, indexed by `ProfileId`.
 std::span<const ProfileDesc> AllProfileDescs();
 
 } // namespace wem

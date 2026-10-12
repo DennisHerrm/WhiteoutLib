@@ -138,7 +138,12 @@ std::vector<Vector3f> DeformMesh(const Mesh& mesh, std::span<const Matrix44f> sk
     return out;
 }
 
-std::vector<Vector3f> DeformNormals(const Mesh& mesh, std::span<const Matrix44f> skin) {
+namespace {
+
+/// `DeformNormals`' one body: @p influencesOf(vertex) is what each vertex binds.
+template <class InfluencesOf>
+std::vector<Vector3f> DeformNormalsBy(const Mesh& mesh, std::span<const Matrix44f> skin,
+                                      InfluencesOf&& influencesOf) {
     const std::span<const Vector3f> normals =
         mesh.attributes.get<Vector3f>(geom::names::kNormal, geom::Domain::Halfedge);
     std::vector<Vector3f> out(normals.begin(), normals.end());
@@ -161,7 +166,6 @@ std::vector<Vector3f> DeformNormals(const Mesh& mesh, std::span<const Matrix44f>
     // The row-vector normal matrix is (M^-1)^T = cofactor(M) / det(M); the
     // length is renormalised, so only the determinant's sign survives — it is
     // what keeps a mirrored bone's normals facing out.
-    VertexInfluences influences(mesh);
     std::vector<Matrix44f> normalOf(topology->vertexCount());
     std::vector<u8> ready(topology->vertexCount(), 0);
     for (u32 h = 0; h < topology->halfedgeCount() && h < out.size(); ++h) {
@@ -174,7 +178,7 @@ std::vector<Vector3f> DeformNormals(const Mesh& mesh, std::span<const Matrix44f>
             continue;
         }
         if (ready[v] == 0) {
-            const Matrix44f m = BlendSkinMatrix(influences.of(v), skin);
+            const Matrix44f m = BlendSkinMatrix(influencesOf(v), skin);
             const auto at = [&](int r, int c) {
                 return m.data[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
             };
@@ -210,6 +214,22 @@ std::vector<Vector3f> DeformNormals(const Mesh& mesh, std::span<const Matrix44f>
         out[h] = length > 1e-12f ? posed * (1.0f / length) : rest;
     }
     return out;
+}
+
+} // namespace
+
+std::vector<Vector3f> DeformNormals(const Mesh& mesh, std::span<const Matrix44f> skin) {
+    VertexInfluences influences(mesh);
+    return DeformNormalsBy(mesh, skin, [&](u32 v) { return influences.of(v); });
+}
+
+std::vector<Vector3f> DeformNormals(const Mesh& mesh, std::span<const Matrix44f> skin,
+                                    std::span<const std::vector<geom::Influence>> written) {
+    static const std::vector<geom::Influence> kNone;
+    return DeformNormalsBy(mesh, skin, [&](u32 v) -> std::span<const geom::Influence> {
+        return v < written.size() ? std::span<const geom::Influence>(written[v])
+                                  : std::span<const geom::Influence>(kNone);
+    });
 }
 
 } // namespace skinning

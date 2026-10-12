@@ -625,6 +625,23 @@ ElementSet SharpEdges(const Mesh& mesh, f32 angle) {
     return out;
 }
 
+ElementSet FacesOfMaterials(const Mesh& mesh, std::span<const u32> slots) {
+    ElementSet out;
+    std::vector<u8> wanted(mesh.sections.size(), 0);
+    for (std::size_t s = 0; s < mesh.sections.size(); ++s) {
+        wanted[s] = std::find(slots.begin(), slots.end(), mesh.sections[s].materialSlot) != slots.end() ? 1 : 0;
+    }
+    const std::span<const u32> sections = mesh.faceSections();
+    for (u32 f = 0; f < mesh.faceCount(); ++f) {
+        // A face past the layer is in section 0, as `faceSections` says.
+        const u32 section = f < sections.size() ? sections[f] : 0;
+        if (section < wanted.size() && wanted[section] != 0) {
+            out.faces.push_back(f);
+        }
+    }
+    return out;
+}
+
 ElementSet LinkedByAngle(const Mesh& mesh, const PointTable& points, const ElementSet& selection,
                          LinkDelimit delimit, f32 angle) {
     return detail::LinkedWithin(mesh, points, selection, delimit, angle);

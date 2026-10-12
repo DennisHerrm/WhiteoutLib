@@ -186,6 +186,11 @@ RemoveResult RemoveNode(NodeTree& tree, u32 node, RemovePolicy policy, SkinPolic
                                 ElementRef(ElementKind::Mesh, m));
     }
 
+    // A soft body's lumps follow the skin they shared (`physics/references.h`).
+    if (referencers.physics != nullptr) {
+        SoftFollowRemovedNodes(*referencers.physics, doomed, replacement);
+    }
+
     // --- reparent the survivors ---------------------------------------------------
     if (policy == RemovePolicy::ReparentChildren) {
         // Snapshot the children and their world binds before anything moves; a

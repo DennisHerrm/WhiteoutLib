@@ -410,6 +410,78 @@ TEST_CASE("wem a Link to the world holds its node still", "[wem][anim][stages]")
               .length() < 1e-4f);
 }
 
+TEST_CASE("wem many Links cost a Link each, and each rides as it would alone", "[wem][anim][stages]") {
+    // Forty loose bones, each linked to the head: off, switched on at the
+    // clip's start, and switched on a second in. Reading a Link's carry runs
+    // the stages before it, so worked out afresh a Link doubles the work: the
+    // fortieth would be a million million poses.
+    const auto linked = [](u32 count, int keyed) {
+        Rig rig;
+        for (u32 n = 0; n < count; ++n) {
+            Node made;
+            made.name = "loose " + std::to_string(n);
+            made.pivot = Vector3f{static_cast<f32>(n), 3.0f, 12.0f};
+            made.kind = NodeKind::Bone;
+            const u32 loose = rig.document.models[0].nodes.add(made);
+            const PoseStage link = rig.stage(StageKind::Link, {loose}, {rig.head});
+            if (keyed == 1) {
+                rig.key(link, 1, {0.0f}, {1.0f});
+            } else if (keyed == 2) {
+                rig.key(link, 1, {0.0f, 1.0f}, {0.0f, 1.0f});
+            }
+        }
+        return rig;
+    };
+    for (const int keyed : {0, 1, 2}) {
+        INFO("keyed " << keyed);
+        const Rig many = linked(40, keyed);
+        const Rig one = linked(1, keyed);
+        const u32 first = one.tip + 1;
+        for (const f32 at : {0.0f, 0.4f, 1.0f, 1.6f}) {
+            INFO("at " << at);
+            const std::vector<Matrix44f> frames = Frames(many.document, at, true);
+            // The first of the forty is the one alone.
+            CHECK(Worst(frames[first], Frames(one.document, at, true)[first]) < 1e-4f);
+            // Off, each stands where the animation has it; on, each keeps its
+            // place under the head from its switch on.
+            const std::vector<Matrix44f> free = Frames(many.document, at, false);
+            const f32 since = keyed == 1 ? 0.0f : 1.0f;
+            const std::vector<Matrix44f> then = Frames(many.document, since, false);
+            for (u32 n = 0; n < 40; ++n) {
+                const u32 loose = first + n;
+                if (keyed == 0 || at < since) {
+                    CHECK(Worst(frames[loose], free[loose]) < 1e-4f);
+                } else {
+                    CHECK(Worst(frames[loose] * Matrix44f::inverse(free[many.head]),
+                                then[loose] * Matrix44f::inverse(then[many.head])) < 1e-3f);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("wem a Link reads its source as the Links before it leave it", "[wem][anim][stages]") {
+    // The tip rides the target, and a loose bone rides the tip: it goes
+    // where the first Link takes the tip, not where the animation has it.
+    Rig rig;
+    Node made;
+    made.name = "loose";
+    made.pivot = Vector3f{2, 3, 12};
+    made.kind = NodeKind::Bone;
+    const u32 loose = rig.document.models[0].nodes.add(made);
+    const PoseStage first = rig.stage(StageKind::Link, {rig.tip}, {rig.target});
+    const PoseStage second = rig.stage(StageKind::Link, {loose}, {rig.tip});
+    rig.key(first, 1, {0.0f}, {1.0f});
+    rig.key(second, 1, {0.0f, 0.5f}, {0.0f, 1.0f});
+    const std::vector<Matrix44f> at = Frames(rig.document, 0.5f, true);
+    const std::vector<Matrix44f> later = Frames(rig.document, 1.4f, true);
+    CHECK(Worst(at[loose], Frames(rig.document, 0.5f, false)[loose]) < 1e-3f);
+    CHECK(Worst(later[loose] * Matrix44f::inverse(later[rig.tip]), at[loose] * Matrix44f::inverse(at[rig.tip])) < 1e-3f);
+    // The tip is off where the animation has it by then, and the bone with it.
+    CHECK((OriginOf(later[rig.tip]) - OriginOf(Frames(rig.document, 1.4f, false)[rig.tip])).length() > 1.0f);
+    CHECK((OriginOf(later[loose]) - OriginOf(Frames(rig.document, 1.4f, false)[loose])).length() > 1.0f);
+}
+
 TEST_CASE("wem a stage's weight is a node channel no exporter writes", "[wem][anim][stages]") {
     Rig rig;
     rig.stage(StageKind::LookAt, {rig.head}, {rig.target});

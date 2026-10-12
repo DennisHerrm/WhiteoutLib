@@ -54,6 +54,20 @@ bool CarriesCloth(const Document& document);
  */
 u32 DropClothForProfile(Document& document, ProfileId target, Diagnostics& out);
 
+/// Whether @p document holds a soft body.
+bool CarriesSoft(const Document& document);
+
+/**
+ * @brief A file for @p target written without its soft bodies
+ *        (EDIT_MODE_SOFTBODY_DESIGN.md §12): the records go, with their layers
+ *        and their four channels. No game runs one, so this is every target's.
+ *
+ * What a soft body moves is kept by `ExpandSoftToBones`, which runs first and
+ * turns the lumps into bones; this only takes away what no file holds. Only on
+ * a file's copy. Returns how many soft bodies went.
+ */
+u32 DropSoftForProfile(Document& document, ProfileId target, Diagnostics& out);
+
 /// "Death", or "Death" and then a space: a clip StarCraft II plays as one.
 bool IsDeathClipName(std::string_view name);
 

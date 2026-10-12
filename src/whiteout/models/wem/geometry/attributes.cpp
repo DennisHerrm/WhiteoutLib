@@ -50,6 +50,13 @@ constexpr ReservedRow kReserved[] = {
     {names::kFractureSkinNode, Domain::Vertex, AttrType::U32x4},
     {names::kFractureSkinWeight, Domain::Vertex, AttrType::F32x4},
     {names::kFractureSection, Domain::Face, AttrType::U32},
+    // The soft bodies' (EDIT_MODE_SOFTBODY_DESIGN.md §13).
+    {names::kSoftBody, Domain::Vertex, AttrType::U32},
+    {names::kSoftSoftness, Domain::Vertex, AttrType::F32},
+    {names::kSoftPainted, Domain::Vertex, AttrType::Bool},
+    {names::kSoftJoined, Domain::Vertex, AttrType::Bool},
+    {names::kSoftBindLump, Domain::Vertex, AttrType::U32x4},
+    {names::kSoftBindWeight, Domain::Vertex, AttrType::F32x4},
 };
 
 /// True when @p name is @p prefix followed by one or more decimal digits.

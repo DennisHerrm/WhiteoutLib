@@ -38,6 +38,7 @@
 #include <whiteout/vector_types.h>
 
 #include "../profile.h"
+#include "soft.h"
 
 namespace whiteout {
 namespace models {
@@ -817,12 +818,16 @@ struct PhysicsSet {
     std::vector<ClothCollider> colliders;
     std::vector<Cloth> cloths;
     std::vector<PhysicsRig> rigs;
+    /// The Workshop's soft bodies (`soft.h`). Authoring state: no export
+    /// reads them but through `ExpandSoftToBones`.
+    std::vector<SoftBody> soft;
     /// The next id to hand out. Ids are never reused, so a channel naming a
     /// removed record never names a new one.
     u32 nextId = 1;
 
     bool empty() const {
-        return bodies.empty() && joints.empty() && colliders.empty() && cloths.empty() && rigs.empty();
+        return bodies.empty() && joints.empty() && colliders.empty() && cloths.empty() && rigs.empty() &&
+               soft.empty();
     }
 
     /// A fresh id, never handed out before.
@@ -837,6 +842,8 @@ struct PhysicsSet {
     const Cloth* cloth(u32 id) const;
     Cloth* cloth(u32 id);
     const PhysicsRig* rig(u32 id) const;
+    const SoftBody* softBody(u32 id) const;
+    SoftBody* softBody(u32 id);
 
     /// Whether any record has id @p id.
     bool hasId(u32 id) const;
@@ -853,6 +860,8 @@ struct PhysicsSet {
         v.field("cloths", cloths);
         v.field("rigs", rigs);
         v.field("nextId", nextId);
+        // Inline in the model's chunk, so this is `MODL` v9: none before.
+        v.since(9).field("soft", soft);
     }
 };
 

@@ -3,6 +3,9 @@
 
 #include <whiteout/models/wem/physics/bake.h>
 #include <whiteout/models/wem/physics/cloth_bake.h>
+#include <whiteout/models/wem/physics/soft_step.h>
+
+#include "soft_pass.h"
 
 #include <whiteout/models/wem/anim/clip.h>
 #include <whiteout/models/wem/anim/curve_keys.h>
@@ -234,26 +237,57 @@ u64 WrittenHash(const Clip& clip, const PhysicsBake& record) {
     return hash;
 }
 
-} // namespace
+/// The lists and the flag soft bodies added to the records a bake's inputs hold.
+constexpr std::string_view kSoftLists[] = {"soft",        "softIds",  "softLumps", "softKeys",     "softWithin",
+                                           "softFollows", "softPush", "softAtEnd", "softChannels", "softSource",
+                                           "madeSettings"};
 
-u64 BakeInputs(const Document& document, u32 clip) {
+/// Every bound a document states is measured from what it holds, a baked
+/// clip's keys among it (Recompute Extents, which every save runs), and a bake
+/// reads none of them: in the key, a clip went out of date at its own save.
+constexpr std::string_view kMeasured[] = {"bounds"};
+
+/// `ReflectBytes` for a bake's key: the bounds left out unless @p bounds, and
+/// with @p lists the soft lists too while they are empty or off, so a model
+/// with no soft body hashes as it did before there were any and a clip baked
+/// then does not read out of date.
+template <class T>
+std::vector<u8> InputBytes(const T& value, bool bounds, bool lists = false) {
+    ReflectBytesVisitor visitor;
+    if (lists) {
+        visitor.omitEmpty = kSoftLists;
+    }
+    if (!bounds) {
+        visitor.omit = kMeasured;
+    }
+    visitor.field("", const_cast<T&>(value));
+    return std::move(visitor.bytes);
+}
+
+/// `BakeInputs`, or with @p bounds the key as it was made while it held them.
+u64 Inputs(const Document& document, u32 clip, bool bounds) {
     u64 hash = 1469598103934665603ull;
     if (clip >= document.clips.size() || document.clips[clip].model >= document.models.size()) {
         return hash;
     }
     const u32 owner = document.clips[clip].model;
     const Model& model = document.models[owner];
-    Hash(hash, ReflectBytes(model.nodes));
-    Hash(hash, ReflectBytes(model.physics));
+    Hash(hash, InputBytes(model.nodes, bounds));
+    Hash(hash, InputBytes(model.physics, bounds, true));
     // A cloth's cage, pins, anchors and bindings are its mesh's (cloth design
     // §10.5).
     std::set<u32> clothMeshes;
     for (const Cloth& cloth : model.physics.cloths) {
         clothMeshes.insert(cloth.cage.mesh);
     }
+    // A soft body's softness, lumps and lanes are its meshes' layers too (soft
+    // design §11.4).
+    for (const SoftBody& body : model.physics.soft) {
+        clothMeshes.insert(body.meshes.begin(), body.meshes.end());
+    }
     for (const u32 m : clothMeshes) {
         if (m < model.meshes.size()) {
-            Hash(hash, ReflectBytes(model.meshes[m]));
+            Hash(hash, InputBytes(model.meshes[m], bounds));
         }
     }
     // The channels some clip's source keys: one only a bake keys was written,
@@ -298,7 +332,14 @@ u64 BakeInputs(const Document& document, u32 clip) {
             source.physics.emplace();
         }
         source.physics->baked.reset();
-        Hash(hash, ReflectBytes(source));
+        Hash(hash, InputBytes(source, bounds));
+    }
+    // A clip not set up carries no dropped rig over from what it comes from
+    // (switches.cpp). Said only of one that is not, so a clip baked when every
+    // baked clip was set up reads as it did.
+    if (!IsSetUp(document.clips[clip])) {
+        const u8 unset = 0x5u;
+        Hash(hash, std::span<const u8>(&unset, 1));
     }
     // What a once-played clip's end is matched into, as it stands: a Rebake of
     // it makes this clip out of date (§7.4).
@@ -306,9 +347,25 @@ u64 BakeInputs(const Document& document, u32 clip) {
         to < document.clips.size()) {
         Clip target = document.clips[to];
         DetachClip(model.animChannels, target);
-        Hash(hash, ReflectBytes(target));
+        Hash(hash, InputBytes(target, bounds, true));
     }
     return hash;
+}
+
+} // namespace
+
+u64 BakeInputs(const Document& document, u32 clip) {
+    return Inputs(document, clip, false);
+}
+
+bool BakeInDate(const Document& document, u32 clip) {
+    if (clip >= document.clips.size() || !document.clips[clip].physics.has_value() ||
+        !document.clips[clip].physics->baked.has_value()) {
+        return false;
+    }
+    const u64 held = document.clips[clip].physics->baked->inputs;
+    // A key made while the bounds were in it stands for as long as they do.
+    return held == Inputs(document, clip, false) || held == Inputs(document, clip, true);
 }
 
 BakeRun SimulateClip(const Document& given, u32 clip, const BakeHooks& hooks, const std::atomic<bool>* cancel,
@@ -342,9 +399,7 @@ BakeRun SimulateClip(const Document& given, u32 clip, const BakeHooks& hooks, co
     const Document& document = anyBaked ? restored : given;
     const Model& owner = document.models[model];
     const ClipPhysics& settings = SettingsOf(baked);
-    const u32 rate = std::max<u32>(settings.stepRate, 15);
-    run.steps = std::max<u32>(1, static_cast<u32>(std::ceil(baked.duration * static_cast<f32>(rate) - 1e-3f)));
-    run.dt = baked.duration / static_cast<f32>(run.steps);
+    run.steps = BakeStepsOf(document, clip, run.dt);
     const u32 preheat = std::min<u32>(settings.preheat, 20);
     const f32 dt = run.dt;
     const auto stepsOf = [&](f32 seconds) { return std::max<u32>(1, static_cast<u32>(std::lround(seconds / dt))); };
@@ -897,7 +952,19 @@ void Splice(const SubTrack* source, Interpolation interp, const std::vector<Tran
 
 } // namespace
 
-BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesTo) {
+u32 BakeStepsOf(const Document& document, u32 clip, f32& dt) {
+    dt = 1.0f / 60.0f;
+    if (clip >= document.clips.size() || !(document.clips[clip].duration > 0.0f)) {
+        return 0;
+    }
+    const Clip& baked = document.clips[clip];
+    const u32 rate = std::max<u32>(SettingsOf(baked).stepRate, 15);
+    const u32 steps = std::max<u32>(1, static_cast<u32>(std::ceil(baked.duration * static_cast<f32>(rate) - 1e-3f)));
+    dt = baked.duration / static_cast<f32>(steps);
+    return steps;
+}
+
+BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesTo, SoftModesCache* softModes) {
     BakeReport report;
     if (run.clip >= document.clips.size() || !run.complete || run.steps == 0) {
         report.error = run.error.empty() ? "the run is not complete" : run.error;
@@ -1408,16 +1475,6 @@ BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesT
         report.cloths.push_back({cloth->id, static_cast<u32>(drivers.vertices.size()), 0.0f,
                                  c < run.clothSize.size() ? run.clothSize[c] : 0.0f});
     }
-    // Container by container, in the order they stood: an Unbake puts each
-    // back in turn.
-    for (u32 c = 0; c < replaced.size(); ++c) {
-        std::stable_sort(replaced[c].begin(), replaced[c].end(),
-                         [](const auto& a, const auto& b) { return a.first < b.first; });
-        for (auto& [place, track] : replaced[c]) {
-            record.positions.push_back(place);
-            record.source[c].subTracks.push_back(std::move(track));
-        }
-    }
     // Fewer keys, only among those the bake wrote (§8.3). A bake that wrote
     // none is still recorded, so the clip reads baked.
     if (settings.tolerance > 0.0f && !record.channels.empty()) {
@@ -1443,6 +1500,163 @@ BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesT
         report.maxError = reduced.maxError;
     }
 
+    // The soft bodies, last (soft design §11.1): stepped on the clip as the
+    // keys above now play it. A copy's and a surface lump's tracks are the
+    // body's own; a bone used as it is is keyed in place, scale included, and
+    // only where its lump departs.
+    std::vector<u32> lumpChannels;
+    {
+        softdetail::SoftPass pass =
+            softdetail::RunSoftPass(document, clipIndex, steps, dt, settings.tolerance * height, stride, softModes);
+        report.soft = std::move(pass.lines);
+        appended.insert(appended.end(), pass.declared.begin(), pass.declared.end());
+        if (!pass.tracks.empty() && clip.containers.empty()) {
+            clip.containers.emplace_back();
+            replaced.emplace_back();
+            before.emplace_back();
+            record.source.emplace_back();
+        }
+        for (SubTrack& track : pass.tracks) {
+            own(track.channel);
+            lumpChannels.push_back(track.channel);
+            clip.containers.front().subTracks.push_back(std::move(track));
+        }
+        // A third of the accuracy for each of a bone's three tracks, as a
+        // lump's own get.
+        const f32 softNoise = settings.tolerance / 3.0f;
+        for (const softdetail::SoftBoneKeys& bone : pass.bones) {
+            if (global.count(bone.node) != 0) {
+                report.globalLoops.push_back(bone.node);
+                continue;
+            }
+            std::vector<std::pair<u32, u32>> spans;
+            for (u32 i = 0; i <= steps; ++i) {
+                if (bone.departs[i] == 0) {
+                    continue;
+                }
+                if (!spans.empty() && spans.back().second + 1 >= i) {
+                    spans.back().second = i;
+                } else {
+                    spans.emplace_back(i, i);
+                }
+            }
+            u32 keys = 0;
+            for (const Channel which : {Channel::Rotation, Channel::Translation, Channel::Scale}) {
+                if ((which == Channel::Rotation && !bone.turns) || (which == Channel::Translation && !bone.moves) ||
+                    (which == Channel::Scale && !bone.scales)) {
+                    continue;
+                }
+                const bool quat = which == Channel::Rotation;
+                u32 channel = FindNodeChannel(owner, bone.node, which);
+                if (channel == kInvalidIndex) {
+                    AnimChannel made;
+                    made.id = owner.animChannels.nextFreeId();
+                    made.target.kind = TrackTarget::Kind::Node;
+                    made.target.node = bone.node;
+                    made.target.channel = which;
+                    made.valueType = quat ? geom::AttrType::Quat : geom::AttrType::F32x3;
+                    channel = owner.animChannels.add(made);
+                    appended.push_back(channel);
+                } else {
+                    own(channel);
+                }
+                const AnimChannel* declared = owner.animChannels.find(channel);
+                if (declared->valueType != (quat ? geom::AttrType::Quat : geom::AttrType::F32x3)) {
+                    continue; // an Euler turn or a single-float scale is not the bake's to rewrite
+                }
+                // Written above for a body on the same bone: its keys are the
+                // source here, and its own source is already kept.
+                const bool again =
+                    std::find(record.channels.begin(), record.channels.end(), channel) != record.channels.end();
+                u32 home = 0;
+                const SubTrack* source = nullptr;
+                for (u32 c = 0; c < clip.containers.size(); ++c) {
+                    if (const SubTrack* found = clip.containers[c].find(channel); found != nullptr && source == nullptr) {
+                        home = c;
+                        source = found;
+                    }
+                }
+                SubTrack original;
+                if (source != nullptr) {
+                    original = *source;
+                    if (!original.tcb.empty()) {
+                        ++report.restated;
+                    }
+                }
+                Interpolation interp = quat ? Interpolation::Slerp : Interpolation::Linear;
+                if (source != nullptr) {
+                    interp = source->interp;
+                } else if (const std::optional<Interpolation> elsewhere =
+                               ControllerElsewhere(document, model, clipIndex, channel)) {
+                    interp = *elsewhere;
+                }
+                SubTrack made;
+                made.channel = channel;
+                std::vector<f32> keptTimes;
+                if (quat) {
+                    std::vector<Quaternion> plays(steps + 1);
+                    for (u32 i = 0; i <= steps; ++i) {
+                        plays[i] = bone.plays[i].rotation;
+                    }
+                    Splice<Quaternion>(source != nullptr ? &original : nullptr, interp, bone.samples, spans, dt, stride,
+                                       softNoise, height, plays, made, keptTimes);
+                } else {
+                    // `Splice` reads a translation: a scale goes through it as
+                    // one, measured by what it moves a point a reach away.
+                    const bool scale = which == Channel::Scale;
+                    std::vector<Transform> samples = bone.samples;
+                    std::vector<Vector3f> plays(steps + 1);
+                    for (u32 i = 0; i <= steps; ++i) {
+                        if (scale) {
+                            samples[i].translation = bone.samples[i].scale;
+                        }
+                        plays[i] = scale ? bone.plays[i].scale : bone.plays[i].translation;
+                    }
+                    Splice<Vector3f>(source != nullptr ? &original : nullptr, interp, samples, spans, dt, stride, softNoise,
+                                     scale ? height / std::max(bone.reach, 1e-6f) : height, plays, made, keptTimes);
+                }
+                keys += static_cast<u32>(made.times.size());
+                if (again) {
+                    // The keys a body's bake left here are what the soft bodies
+                    // were stepped on, and nothing else holds them.
+                    if (source != nullptr && std::find(record.softChannels.begin(), record.softChannels.end(),
+                                                       channel) == record.softChannels.end()) {
+                        if (record.softSource.empty()) {
+                            record.softSource.emplace_back();
+                        }
+                        record.softSource.front().subTracks.push_back(original);
+                        record.softChannels.push_back(channel);
+                    }
+                    for (SubTrack& track : clip.containers[home].subTracks) {
+                        if (track.channel == channel) {
+                            track = std::move(made);
+                            break;
+                        }
+                    }
+                } else {
+                    record.channels.push_back(channel);
+                    record.softChannels.push_back(channel);
+                    place(channel, std::move(made), home, source != nullptr);
+                }
+            }
+            for (BakeReport::SoftLine& line : report.soft) {
+                if (line.body == bone.body) {
+                    line.keys += keys;
+                }
+            }
+        }
+    }
+    // Container by container, in the order they stood: an Unbake puts each
+    // back in turn.
+    for (u32 c = 0; c < replaced.size(); ++c) {
+        std::stable_sort(replaced[c].begin(), replaced[c].end(),
+                         [](const auto& a, const auto& b) { return a.first < b.first; });
+        for (auto& [place, track] : replaced[c]) {
+            record.positions.push_back(place);
+            record.source[c].subTracks.push_back(std::move(track));
+        }
+    }
+
     // The seam after, as the keys now play it.
     {
         const Animator animator(document, model);
@@ -1462,8 +1676,19 @@ BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesT
         report.seamAfter = seamAfter;
     }
     report.seamBefore = seamBefore;
-    // After the reduction: a stepped weight is not its to thin.
+    // After the reduction: a stepped weight is not its to thin, and a lump's
+    // tracks were thinned by their own measure.
     record.channels.insert(record.channels.end(), weights.begin(), weights.end());
+    record.channels.insert(record.channels.end(), lumpChannels.begin(), lumpChannels.end());
+    for (const BakeReport::SoftLine& line : report.soft) {
+        record.softIds.push_back(line.body);
+        record.softLumps.push_back(line.lumps);
+        record.softKeys.push_back(line.keys);
+        record.softWithin.push_back(line.within);
+        record.softFollows.push_back(line.follows);
+        record.softPush.push_back(line.push);
+        record.softAtEnd.push_back(line.atEnd);
+    }
     record.nodes = report.nodes;
     record.keys = report.keys;
     record.restated = report.restated;
@@ -1485,6 +1710,9 @@ BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesT
     }
     record.written = WrittenHash(document.clips[clipIndex], record);
     Clip& out = document.clips[clipIndex];
+    // Settings added here only hold the record: the clip is no more set up
+    // than it was, and an Unbake takes them with it.
+    record.madeSettings = !out.physics.has_value();
     if (!out.physics.has_value()) {
         out.physics.emplace();
     }
@@ -1533,8 +1761,12 @@ void UnbakeClip(Document& document, u32 clip, bool dropChannels) {
         return;
     }
     const std::vector<u32> appended = target.physics->baked->appended;
+    const bool madeSettings = target.physics->baked->madeSettings;
     RestoreSource(target);
     target.physics->baked.reset();
+    if (madeSettings) {
+        target.physics.reset();
+    }
     // A channel the bake declared goes once nothing keys it: another clip's
     // bake may have keyed it since.
     const u32 model = target.model;
@@ -1558,7 +1790,18 @@ std::vector<u32> UnbakedSetUpClips(const Document& document) {
     std::vector<u32> out;
     for (u32 c = 0; c < document.clips.size(); ++c) {
         const Clip& clip = document.clips[c];
-        if (clip.physics.has_value() && !clip.physics->baked.has_value() && !IsGlobalLoop(clip)) {
+        const bool baked = clip.physics.has_value() && clip.physics->baked.has_value();
+        if (!baked && !IsGlobalLoop(clip) && (clip.physics.has_value() || SoftActsIn(document, c))) {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
+std::vector<u32> UnbakedSoftClips(const Document& document) {
+    std::vector<u32> out;
+    for (const u32 c : UnbakedSetUpClips(document)) {
+        if (SoftActsIn(document, c)) {
             out.push_back(c);
         }
     }
@@ -1569,12 +1812,18 @@ std::vector<u32> OutOfDateBakes(const Document& document) {
     std::vector<u32> out;
     for (u32 c = 0; c < document.clips.size(); ++c) {
         const Clip& clip = document.clips[c];
-        if (clip.physics.has_value() && clip.physics->baked.has_value() &&
-            clip.physics->baked->inputs != BakeInputs(document, c)) {
+        if (clip.physics.has_value() && clip.physics->baked.has_value() && !BakeInDate(document, c)) {
             out.push_back(c);
         }
     }
     return out;
+}
+
+u64 BakeWrittenNow(const Document& document, u32 clip) {
+    if (clip >= document.clips.size() || !document.clips[clip].physics || !document.clips[clip].physics->baked) {
+        return 0;
+    }
+    return WrittenHash(document.clips[clip], *document.clips[clip].physics->baked);
 }
 
 bool BakedKeysEdited(const Document& document, u32 clip) {
@@ -1586,9 +1835,9 @@ bool BakedKeysEdited(const Document& document, u32 clip) {
 }
 
 u32 BakeForExport(Document& document, const BakeHooks& hooks, std::span<const std::shared_ptr<const BakeRun>> runs,
-                  Diagnostics& out) {
+                  Diagnostics& out, const std::vector<u32>* only) {
     u32 baked = 0;
-    for (const u32 clip : BakeOrder(document, UnbakedSetUpClips(document))) {
+    for (const u32 clip : BakeOrder(document, only != nullptr ? *only : UnbakedSetUpClips(document))) {
         const u64 inputs = BakeInputs(document, clip);
         const BakeRun* use = nullptr;
         for (const std::shared_ptr<const BakeRun>& run : runs) {

@@ -1331,7 +1331,8 @@ TEST_CASE("optimize keeps every node something names", "[wem][optimize]") {
         "gate",        "stage_driven", "stage_target",  "stage_source", "stage_up",
         "body",        "collider",     "cloth_bone",    "helper",       "field",
         "whole_gate",  "pieces_gate",  "fracture_bone", "skin_node",    "link",
-        "event",       "centre"};
+        "event",       "centre",       "soft_carrier",  "soft_node",    "soft_chain",
+        "soft_axis",   "soft_strand"};
     Rig rig;
     const u32 skin = rig.material(rig.texture("textures/skin.blp"));
     const u32 root = rig.bone("root", kNoParent, {0, 0, 0}, true);
@@ -1378,6 +1379,29 @@ TEST_CASE("optimize keeps every node something names", "[wem][optimize]") {
     pieces.fracture->bones = {at("fracture_bone")};
     pieces.fracture->skinNodes = {at("skin_node")};
     model.physics.rigs.push_back(pieces);
+    SoftBody soft;
+    soft.id = model.physics.nextId++;
+    SoftLump lump;
+    lump.kind = SoftLumpKind::Copy;
+    lump.carrier = at("soft_carrier");
+    lump.node = at("soft_node");
+    soft.lumps.push_back(lump);
+    SoftEffect bulge = DefaultSoftEffect(SoftEffectKind::Bulge);
+    bulge.id = soft.nextEffect++;
+    bulge.bulge->chain = {at("soft_chain")};
+    soft.effects.push_back(bulge);
+    SoftEffect wobble = DefaultSoftEffect(SoftEffectKind::Wobble);
+    wobble.id = soft.nextEffect++;
+    wobble.wobble->axis = SoftAxis::Bone;
+    wobble.wobble->axisBone = at("soft_axis");
+    soft.effects.push_back(wobble);
+    SoftEffect drip = DefaultSoftEffect(SoftEffectKind::Drip);
+    drip.id = soft.nextEffect++;
+    drip.drip->strandNodes = {at("soft_strand"), kInvalidNode, kInvalidNode};
+    drip.drip->strandAt = {Vector3f{0, 0, 0}};
+    drip.drip->strandWidth = {1.0f};
+    soft.effects.push_back(drip);
+    model.physics.soft.push_back(soft);
     model.nodes.nodes[at("root")].skin.mirror = at("link");
     REQUIRE_FALSE(document.clips.empty());
     ClipEvent event;
@@ -1394,7 +1418,7 @@ TEST_CASE("optimize keeps every node something names", "[wem][optimize]") {
     ForEachNodeReference(held.nodes, std::span<const Mesh>(held.meshes), &held.animChannels,
                          &held.poseStages, &held.physics, std::span<const Clip>(document.clips),
                          [&](NodeReference row, const u32&, u32, u32) { rows.insert(row); });
-    for (int row = 0; row <= static_cast<int>(NodeReference::ClipWorldCentre); ++row) {
+    for (int row = 0; row <= static_cast<int>(NodeReference::SoftStrand); ++row) {
         if (static_cast<NodeReference>(row) == NodeReference::RigidNode) {
             continue; // No section of this model is rigid.
         }
@@ -1429,6 +1453,11 @@ TEST_CASE("optimize keeps every node something names", "[wem][optimize]") {
     CHECK(fracture.piecesGate == at("pieces_gate"));
     CHECK(fracture.bones == std::vector<u32>{at("fracture_bone")});
     CHECK(fracture.skinNodes == std::vector<u32>{at("skin_node")});
+    REQUIRE(model.physics.soft.size() == 1);
+    CHECK(model.physics.soft[0].lumps[0].carrier == at("soft_carrier"));
+    CHECK(model.physics.soft[0].lumps[0].node == at("soft_node"));
+    CHECK(model.physics.soft[0].effects[0].bulge->chain == std::vector<u32>{at("soft_chain")});
+    CHECK(model.physics.soft[0].effects[1].wobble->axisBone == at("soft_axis"));
     CHECK(model.nodes.nodes[at("root")].skin.mirror == at("link"));
     CHECK(document.clips[0].events.back().node == at("event"));
     CHECK(document.clips[0].physics->world[0].centreNode == at("centre"));

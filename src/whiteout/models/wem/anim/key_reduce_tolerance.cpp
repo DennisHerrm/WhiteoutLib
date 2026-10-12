@@ -110,6 +110,12 @@ Kind KindOf(const AnimChannel& channel, bool layered) {
     case Channel::StageWeight:
     case Channel::StageSourceWeight:
     case Channel::StageSourceEnabled:
+    // A span's keys are what the user placed, and a lump's are thinned by the
+    // bake, where its points land (EDIT_MODE_SOFTBODY_DESIGN.md §11.2).
+    case Channel::SoftAmount:
+    case Channel::SoftLumpTranslation:
+    case Channel::SoftLumpRotation:
+    case Channel::SoftLumpScale:
         return Kind::Exact;
     default:
         return Kind::Relative;

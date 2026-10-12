@@ -62,7 +62,12 @@ enum class NodeReference : u8 {
     FractureSkinNode,   ///< `FractureRecipe::skinNodes`: its layers name them by place.
     NodeLink,       ///< A node's own links (`ForEachNodeLink`). Owner: the node.
     ClipEvent,      ///< `ClipEvent::node`. Owner: the clip, as the caller numbers it.
-    ClipWorldCentre ///< `BakeWorldForce::centreNode`; none for the model's middle. Owner: the clip.
+    ClipWorldCentre, ///< `BakeWorldForce::centreNode`; none for the model's middle. Owner: the clip.
+    SoftCarrier,     ///< `SoftLump::carrier`; none for a lump that hangs from the model.
+    SoftNode,        ///< `SoftLump::node`: the bone a lump is, or copies; none for a surface lump.
+    SoftChain,       ///< `SoftBulge::chain`.
+    SoftAxisBone,    ///< A Wobble's or a Squash & stretch's `axisBone`; none unless its axis is a bone's.
+    SoftStrand,      ///< `SoftDrip::strandNodes` and `dropNodes`: a strand's bones and its droplet's, by place.
 };
 
 /// @p mesh's rows: its skin, and each section's rigid node and visibility gate.
@@ -127,7 +132,7 @@ void ForEachStageNodeReference(StagesT& stages, F&& f) {
 }
 
 /// @p physics's rows: what its bodies and colliders ride, a cloth's bones,
-/// and everything a fracture names.
+/// everything a fracture names, and a soft body's lumps and effects.
 template <class PhysicsT, class F>
 void ForEachPhysicsNodeReference(PhysicsT& physics, F&& f) {
     for (auto& body : physics.bodies) {
@@ -158,6 +163,33 @@ void ForEachPhysicsNodeReference(PhysicsT& physics, F&& f) {
         }
         for (auto& node : fracture.skinNodes) {
             f(NodeReference::FractureSkinNode, node, rig.id, kInvalidIndex);
+        }
+    }
+    for (auto& body : physics.soft) {
+        for (auto& lump : body.lumps) {
+            f(NodeReference::SoftCarrier, lump.carrier, body.id, kInvalidIndex);
+            f(NodeReference::SoftNode, lump.node, body.id, kInvalidIndex);
+        }
+        for (auto& effect : body.effects) {
+            if (effect.bulge) {
+                for (auto& node : effect.bulge->chain) {
+                    f(NodeReference::SoftChain, node, body.id, effect.id);
+                }
+            }
+            if (effect.wobble) {
+                f(NodeReference::SoftAxisBone, effect.wobble->axisBone, body.id, effect.id);
+            }
+            if (effect.squash) {
+                f(NodeReference::SoftAxisBone, effect.squash->axisBone, body.id, effect.id);
+            }
+            if (effect.drip) {
+                for (auto& node : effect.drip->strandNodes) {
+                    f(NodeReference::SoftStrand, node, body.id, effect.id);
+                }
+                for (auto& node : effect.drip->dropNodes) {
+                    f(NodeReference::SoftStrand, node, body.id, effect.id);
+                }
+            }
         }
     }
 }

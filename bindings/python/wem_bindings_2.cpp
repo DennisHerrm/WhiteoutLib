@@ -41,6 +41,7 @@
 #include <whiteout/models/wem/nodes/tree.h>
 #include <whiteout/models/wem/anim/channel.h>
 #include <whiteout/models/wem/anim/clip.h>
+#include <whiteout/models/wem/physics/soft.h>
 #include <whiteout/models/wem/physics/physics.h>
 #include <whiteout/models/wem/physics/materials.h>
 #include <whiteout/models/wem/model.h>
@@ -90,6 +91,10 @@ PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::ProfileMaterialSet>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::Sc2Property<whiteout::Vector3f>>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::Sc2RibbonSplinePoint>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SlotBinding>);
+PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SoftBody>);
+PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SoftEffect>);
+PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SoftLump>);
+PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SoftPart>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SubTrack>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SubTrackContainer>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::TextureRef>);
@@ -164,6 +169,70 @@ auto bindBufferVector(py::module_& m, const char* name) {
 } // namespace
 // Part 2 of bind_wem(), which calls the parts in order.
 void bind_wem_2(py::module_& m) {
+    py::class_<whiteout::models::wem::PhysicsMaterial>(m, "PhysicsMaterial")
+        .def(py::init<>())
+        .def_readwrite("density", &whiteout::models::wem::PhysicsMaterial::density, R"doc(The StarCraft II upgrade's default.)doc")
+        .def_readwrite("friction", &whiteout::models::wem::PhysicsMaterial::friction)
+        .def_readwrite("restitution", &whiteout::models::wem::PhysicsMaterial::restitution)
+    ;
+
+    py::class_<whiteout::models::wem::PhysicsShape>(m, "PhysicsShape")
+        .def(py::init<>())
+        .def_readwrite("kind", &whiteout::models::wem::PhysicsShape::kind)
+        .def_readwrite("half_extents", &whiteout::models::wem::PhysicsShape::halfExtents, R"doc(Box.)doc")
+        .def_readwrite("radius", &whiteout::models::wem::PhysicsShape::radius, R"doc(Sphere, capsule, cylinder.)doc")
+        .def_readwrite("length", &whiteout::models::wem::PhysicsShape::length, R"doc(Along own +Z, centred: a cylinder's whole, and a capsule's between its cap centres when it does not state them in `points`.)doc")
+        .def_readwrite("points", &whiteout::models::wem::PhysicsShape::points, R"doc(Own frame. A convex hull's vertex set; a capsule's two cap centres when the source states its ends (World of Warcraft, Diablo III), which a centred frame cannot hold to the bit.)doc")
+        .def_readwrite("vertices", &whiteout::models::wem::PhysicsShape::vertices, R"doc(Triangle mesh, own frame.)doc")
+        .def_readwrite("triangles", &whiteout::models::wem::PhysicsShape::triangles, R"doc(Triangle mesh, three per face.)doc")
+        .def_readwrite("material", &whiteout::models::wem::PhysicsShape::material)
+        .def_readwrite("game_flags", &whiteout::models::wem::PhysicsShape::gameFlags, R"doc(Domino's fixture `gameFlags`, for a game's contact callbacks. World of Warcraft authors it (0 in every shipped shape).)doc")
+    ;
+
+    py::class_<whiteout::models::wem::Sc2BodyExtension>(m, "Sc2BodyExtension", R"doc(What only StarCraft II means by a body.)doc")
+        .def(py::init<>())
+        .def_readwrite("physics_material", &whiteout::models::wem::Sc2BodyExtension::physicsMaterial, R"doc(`physicsType`: a material id game data may override.)doc")
+        .def_readwrite("collidable", &whiteout::models::wem::Sc2BodyExtension::collidable, R"doc(Flag 0x1.   } The collision filter.)doc")
+        .def_readwrite("walkable", &whiteout::models::wem::Sc2BodyExtension::walkable, R"doc(Flag 0x2.   })doc")
+        .def_readwrite("stackable", &whiteout::models::wem::Sc2BodyExtension::stackable, R"doc(Flag 0x4.   })doc")
+        .def_readwrite("simulate_collision", &whiteout::models::wem::Sc2BodyExtension::simulateCollision, R"doc(Flag 0x8.   })doc")
+        .def_readwrite("keeps_bone_driven", &whiteout::models::wem::Sc2BodyExtension::keepsBoneDriven, R"doc(Flag 0x80: setup and deactivation leave the bone's physics bit.)doc")
+        .def_readwrite("untraced_flags", &whiteout::models::wem::Sc2BodyExtension::untracedFlags, R"doc(Flags 0x10, 0x20 and 0x200: consistently authored, no reader found in the client yet (WEM_PHYSICS_DESIGN.md §14), so kept as they came.)doc")
+    ;
+
+    py::class_<whiteout::models::wem::WowBodyExtension>(m, "WowBodyExtension", R"doc(What only World of Warcraft means by a body: its kinematic drive and how the runtime groups bodies (`PHYS_FORMAT.md` §3.1, §4.6).)doc")
+        .def(py::init<>())
+        .def_readwrite("follow_factor", &whiteout::models::wem::WowBodyExtension::followFactor, R"doc(The fraction of the way a kinematic body is snapped to its bone each step, before the fast-motion ramp takes over. Not a Domino parameter.)doc")
+        .def_readwrite("has_children", &whiteout::models::wem::WowBodyExtension::hasChildren, R"doc(A kinematic body other bodies hang off: its snap carries them.)doc")
+        .def_readwrite("ragdoll_root", &whiteout::models::wem::WowBodyExtension::ragdollRoot, R"doc(The ragdoll's root: its snap carries the groups of kinematic bodies that have no children.)doc")
+        .def_readwrite("parent", &whiteout::models::wem::WowBodyExtension::parent, R"doc(A dynamic body: the kinematic body it hangs off, by id. 0 writes as the first body, as the file's own zero does.)doc")
+    ;
+
+    py::class_<whiteout::models::wem::PhysicsBody>(m, "PhysicsBody")
+        .def(py::init<>())
+        .def_readwrite("id", &whiteout::models::wem::PhysicsBody::id)
+        .def_readwrite("node", &whiteout::models::wem::PhysicsBody::node)
+        .def_readwrite("motion", &whiteout::models::wem::PhysicsBody::motion)
+        .def_readwrite("simulates", &whiteout::models::wem::PhysicsBody::simulates, R"doc(The rest value of `Channel::PhysicsDynamic`: whether it simulates where no key says otherwise.)doc")
+        .def_readwrite("shapes", &whiteout::models::wem::PhysicsBody::shapes)
+        .def_readwrite("linear_damping", &whiteout::models::wem::PhysicsBody::linearDamping)
+        .def_readwrite("angular_damping", &whiteout::models::wem::PhysicsBody::angularDamping)
+        .def_readwrite("inertia_scale", &whiteout::models::wem::PhysicsBody::inertiaScale)
+        .def_readwrite("gravity_scale", &whiteout::models::wem::PhysicsBody::gravityScale, R"doc(StarCraft II hard-wires 1; World of Warcraft authors it.)doc")
+        .def_readwrite("inherit_dynamic", &whiteout::models::wem::PhysicsBody::inheritDynamic, R"doc(Takes the nearest bodied ancestor's current state instead of its own (StarCraft II flag 0x40).)doc")
+        .def_readwrite("exempt_from_ragdoll", &whiteout::models::wem::PhysicsBody::exemptFromRagdoll, R"doc(Stays kinematic when the model ragdolls (StarCraft II flag 0x100).)doc")
+        .def_readwrite("force_channels", &whiteout::models::wem::PhysicsBody::forceChannels, R"doc(Which force fields act on it: matched against `ForceFieldPayload::channels`. StarCraft II's `localForces | worldForces << 16`.)doc")
+        .def_readwrite("sc2", &whiteout::models::wem::PhysicsBody::sc2)
+        .def_readwrite("wow", &whiteout::models::wem::PhysicsBody::wow)
+        .def_readwrite("locked", &whiteout::models::wem::PhysicsBody::locked, R"doc(Tuned by hand: the editor's tools that run over a whole ragdoll leave its shapes alone (EDIT_MODE_PHYSICS_REDESIGN.md §8.7). Authoring state; no export reads it.)doc")
+    ;
+
+    py::class_<whiteout::models::wem::JointSpring>(m, "JointSpring")
+        .def(py::init<>())
+        .def_readwrite("hz", &whiteout::models::wem::JointSpring::hz)
+        .def_readwrite("damping", &whiteout::models::wem::JointSpring::damping)
+    ;
+
     py::class_<whiteout::models::wem::PhysicsJoint>(m, "PhysicsJoint")
         .def(py::init<>())
         .def_readwrite("id", &whiteout::models::wem::PhysicsJoint::id)
@@ -376,6 +445,7 @@ void bind_wem_2(py::module_& m) {
         .def_readwrite("colliders", &whiteout::models::wem::PhysicsSet::colliders)
         .def_readwrite("cloths", &whiteout::models::wem::PhysicsSet::cloths)
         .def_readwrite("rigs", &whiteout::models::wem::PhysicsSet::rigs)
+        .def_readwrite("soft", &whiteout::models::wem::PhysicsSet::soft, R"doc(The Workshop's soft bodies (`soft.h`). Authoring state: no export reads them but through `ExpandSoftToBones`.)doc")
         .def_readwrite("next_id", &whiteout::models::wem::PhysicsSet::nextId, R"doc(The next id to hand out. Ids are never reused, so a channel naming a removed record never names a new one.)doc")
     ;
 
@@ -605,4 +675,5 @@ Colours are RGBA in 0..1, the channel convention; a `u16` squirt count widens to
     py::bind_vector<std::vector<whiteout::models::wem::CombinerStage>>(m, "VectorWemCombinerStage");
     py::bind_vector<std::vector<whiteout::models::wem::CompositeLayer>>(m, "VectorWemCompositeLayer");
     py::bind_vector<std::vector<whiteout::models::wem::Diagnostic>>(m, "VectorWemDiagnostic");
+    py::bind_vector<std::vector<whiteout::models::wem::Diagnostics::CodeCount>>(m, "VectorDiagnosticsCodeCount");
 }

@@ -19,6 +19,7 @@
 
 #include <array>
 #include <span>
+#include <string>
 #include <vector>
 
 #include <whiteout/common_types.h>
@@ -92,6 +93,11 @@ ClothDrawn SkinClothDrawn(const Model& model, const Cloth& cloth, std::span<cons
 /// from the drivers where a bake wrote them, else "as authored" (§10.4). The
 /// cloth itself is left for `DropClothForProfile`. Returns the bones made.
 u32 ExpandClothToBones(Document& document, ProfileId target, Diagnostics& out);
+
+/// A bone named @p name under @p parent, standing at model-space @p rest: its
+/// pivot on a pivot rig, its local and every pose entry on an explicit one.
+/// What an export makes of a record that had no node. Returns its index.
+u32 AddBoneAt(NodeTree& tree, std::string name, u32 parent, const Matrix44f& rest);
 
 /// The best rigid motion carrying @p from onto @p to, each pair weighed by
 /// @p weights (Horn's quaternion method): `to ≈ rotation(from) + translation`.

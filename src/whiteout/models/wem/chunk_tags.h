@@ -188,11 +188,12 @@ struct ChunkTagTraits<Document> {
 /// the Skin workspace's `testPoses` (EDIT_MODE_SKIN_DESIGN.md §13.4); v4 the
 /// `LodExport` setting (EDIT_MODE_MODELLING_DESIGN.md §8.2); v5 `tPose`, which
 /// of those poses is the recovered T (EDIT_MODE_TPOSE_DESIGN.md §7); v6 the
-/// track sets; v7 the pose stages; v8 the physics set (WEM_PHYSICS_DESIGN.md §3).
+/// track sets; v7 the pose stages; v8 the physics set (WEM_PHYSICS_DESIGN.md §3);
+/// v9 the set's soft bodies, inline as the set is (EDIT_MODE_SOFTBODY_DESIGN.md §13).
 template <>
 struct ChunkTagTraits<Model> {
     static constexpr u32 value = kTag("MODL");
-    static constexpr u32 max_version = 8;
+    static constexpr u32 max_version = 9;
     static constexpr bool is_trivial = false;
 };
 
@@ -508,10 +509,11 @@ struct ChunkTagTraits<ClipEvent> {
 /// v4 `Clip::readRule`.
 /// v5 `Clip::physics`, the physics bake's settings (EDIT_MODE_PHYSICS_BAKE_DESIGN.md §9.2).
 /// v6 `PhysicsBake`'s cloths (EDIT_MODE_PHYSICS_CLOTH_DESIGN.md §10.2).
+/// v7 `PhysicsBake`'s soft bodies (EDIT_MODE_SOFTBODY_DESIGN.md §11.2).
 template <>
 struct ChunkTagTraits<Clip> {
     static constexpr u32 value = kTag("CLIP");
-    static constexpr u32 max_version = 6;
+    static constexpr u32 max_version = 7;
     static constexpr bool is_trivial = false;
 };
 
@@ -596,6 +598,38 @@ struct ChunkTagTraits<PhysicsRig> {
     // v2: the `wow` extension; v3: the ragdoll's recipe; v4: the fracture's; v5: its slices, start and filling;
     // v6: what it draws before its start; v7: its planes' reach, and the skeleton cut; v8: the ragdoll cut
     static constexpr u32 max_version = 8;
+    static constexpr bool is_trivial = false;
+};
+
+// --- Soft bodies (EDIT_MODE_SOFTBODY_DESIGN.md §13) ---
+
+template <>
+struct ChunkTagTraits<SoftBody> {
+    static constexpr u32 value = kTag("SBDY");
+    static constexpr u32 max_version = 1;
+    static constexpr bool is_trivial = false;
+};
+
+template <>
+struct ChunkTagTraits<SoftLump> {
+    static constexpr u32 value = kTag("SLMP");
+    static constexpr u32 max_version = 1;
+    static constexpr bool is_trivial = false;
+};
+
+/// An effect, with its kind's settings inline.
+template <>
+struct ChunkTagTraits<SoftEffect> {
+    static constexpr u32 value = kTag("SEFX");
+    static constexpr u32 max_version = 1;
+    static constexpr bool is_trivial = false;
+};
+
+/// A mesh or a material's part of one: what a body keeps clear of, or carries rigidly.
+template <>
+struct ChunkTagTraits<SoftPart> {
+    static constexpr u32 value = kTag("SPRT");
+    static constexpr u32 max_version = 1;
     static constexpr bool is_trivial = false;
 };
 
@@ -710,6 +744,10 @@ inline constexpr u32 kKnownChunkTags[] = {
     ChunkTagTraits<Cloth>::value,
     ChunkTagTraits<ClothBinding>::value,
     ChunkTagTraits<PhysicsRig>::value,
+    ChunkTagTraits<SoftBody>::value,
+    ChunkTagTraits<SoftLump>::value,
+    ChunkTagTraits<SoftEffect>::value,
+    ChunkTagTraits<SoftPart>::value,
     ChunkTagTraits<AnimTag>::value,
     ChunkTagTraits<AnimSet>::value,
     kWoemMagic, // slot 0 is the header's own entry, not a chunk

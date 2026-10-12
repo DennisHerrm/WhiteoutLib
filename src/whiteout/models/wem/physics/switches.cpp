@@ -105,7 +105,7 @@ bool DefaultDropped(const Document& document, u32 clip, const PhysicsRig& rig, u
         return false;
     }
     const Clip& owner = document.clips[clip];
-    if (chained || owner.physics.has_value()) {
+    if (chained || IsSetUp(owner)) {
         const BakeLeadIn from = BakeComesFrom(document, clip);
         if (from.kind == BakeFrom::Clip && from.clip != clip && EndsDropped(document, from.clip, rig, depth + 1)) {
             if (why != nullptr) {

@@ -30,8 +30,11 @@
 #include <whiteout/common_types.h>
 #include <whiteout/models/wem/reflect.h>
 
+#include <algorithm>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <variant>
 #include <vector>
@@ -45,18 +48,37 @@ public:
     static constexpr bool kReading = false;
 
     std::vector<u8> bytes;
+    /// Lists left out of the bytes while they are empty, and flags while they
+    /// are off, by field name: for a key that must not move when a record
+    /// gains one (`BakeInputs`). None for a comparison, which leaves nothing
+    /// out.
+    std::span<const std::string_view> omitEmpty;
+    /// Fields left out whatever they hold, by name: for a key that what they
+    /// hold must not move (`BakeInputs` and a measured bound).
+    std::span<const std::string_view> omit;
 
     template <class T>
-    void field(const char*, T& value) {
+    void field(const char* name, T& value) {
+        if (!omit.empty() && std::find(omit.begin(), omit.end(), std::string_view(name)) != omit.end()) {
+            return;
+        }
         constexpr FieldKind kind = ClassifyField<T>();
         if constexpr (kind == FieldKind::Enum) {
             raw(static_cast<std::underlying_type_t<T>>(value));
         } else if constexpr (kind == FieldKind::Bool) {
+            if (!value && !omitEmpty.empty() &&
+                std::find(omitEmpty.begin(), omitEmpty.end(), std::string_view(name)) != omitEmpty.end()) {
+                return;
+            }
             bytes.push_back(value ? 1 : 0);
         } else if constexpr (kind == FieldKind::String) {
             raw(static_cast<u64>(value.size()));
             bytes.insert(bytes.end(), value.begin(), value.end());
         } else if constexpr (kind == FieldKind::Vector) {
+            if (value.empty() && !omitEmpty.empty() &&
+                std::find(omitEmpty.begin(), omitEmpty.end(), std::string_view(name)) != omitEmpty.end()) {
+                return;
+            }
             list(value);
         } else if constexpr (kind == FieldKind::Reflected) {
             value.reflect(*this);

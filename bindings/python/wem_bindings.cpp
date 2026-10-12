@@ -41,6 +41,7 @@
 #include <whiteout/models/wem/nodes/tree.h>
 #include <whiteout/models/wem/anim/channel.h>
 #include <whiteout/models/wem/anim/clip.h>
+#include <whiteout/models/wem/physics/soft.h>
 #include <whiteout/models/wem/physics/physics.h>
 #include <whiteout/models/wem/physics/materials.h>
 #include <whiteout/models/wem/model.h>
@@ -90,6 +91,10 @@ PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::ProfileMaterialSet>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::Sc2Property<whiteout::Vector3f>>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::Sc2RibbonSplinePoint>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SlotBinding>);
+PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SoftBody>);
+PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SoftEffect>);
+PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SoftLump>);
+PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SoftPart>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SubTrack>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SubTrackContainer>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::TextureRef>);
@@ -927,6 +932,10 @@ Closed on purpose. A source property with no entry here is **dropped with an `An
         .value("EMISSIVE_TEXTURE_INDEX", whiteout::models::wem::Channel::EmissiveTextureIndex, R"doc(U32. Sub-texture 3.)doc")
         .value("TEAM_COLOR_TEXTURE_INDEX", whiteout::models::wem::Channel::TeamColorTextureIndex, R"doc(U32. Sub-texture 4, the team colour's.)doc")
         .value("ENVIRONMENT_TEXTURE_INDEX", whiteout::models::wem::Channel::EnvironmentTextureIndex, R"doc(U32. Sub-texture 5, the reflection.)doc")
+        .value("SOFT_AMOUNT", whiteout::models::wem::Channel::SoftAmount, R"doc(F32, linear. An effect's level or progress in a clip: its spans. `sub` is `SoftSub(body, effect)`.)doc")
+        .value("SOFT_LUMP_TRANSLATION", whiteout::models::wem::Channel::SoftLumpTranslation, R"doc(F32x3. Along the model's axes at the bind.)doc")
+        .value("SOFT_LUMP_ROTATION", whiteout::models::wem::Channel::SoftLumpRotation, R"doc(Quat. About the lump's pivot.)doc")
+        .value("SOFT_LUMP_SCALE", whiteout::models::wem::Channel::SoftLumpScale, R"doc(F32x3. About the lump's pivot, along the model's axes at the bind.)doc")
         .value("COUNT", whiteout::models::wem::Channel::Count)
     ;
 
@@ -999,6 +1008,137 @@ Stored, because a conversion rewrites the keys for another game and the rule has
         .value("GRID", whiteout::models::wem::BakeFloor::Grid)
         .value("OFF", whiteout::models::wem::BakeFloor::Off)
         .value("FOLLOWS_ROOT", whiteout::models::wem::BakeFloor::FollowsRoot)
+    ;
+
+    py::enum_<whiteout::models::wem::SoftEffectKind>(m, "SoftEffectKind", R"doc(Appended, never reordered: the value is what a `SEFX` chunk stores.)doc")
+        .value("INFLATE", whiteout::models::wem::SoftEffectKind::Inflate)
+        .value("BULGE", whiteout::models::wem::SoftEffectKind::Bulge)
+        .value("JIGGLE", whiteout::models::wem::SoftEffectKind::Jiggle)
+        .value("WOBBLE", whiteout::models::wem::SoftEffectKind::Wobble)
+        .value("BLOBIFY", whiteout::models::wem::SoftEffectKind::Blobify)
+        .value("DRIP", whiteout::models::wem::SoftEffectKind::Drip)
+        .value("SQUASH_STRETCH", whiteout::models::wem::SoftEffectKind::SquashStretch)
+        .value("MELT", whiteout::models::wem::SoftEffectKind::Melt)
+        .value("RIPPLE", whiteout::models::wem::SoftEffectKind::Ripple)
+        .value("COUNT", whiteout::models::wem::SoftEffectKind::Count)
+    ;
+
+    py::enum_<whiteout::models::wem::SoftLumpKind>(m, "SoftLumpKind", R"doc(A bone used as it is, a copy that hangs from a bone, or a frame on the surface (§6.2).)doc")
+        .value("BONE", whiteout::models::wem::SoftLumpKind::Bone)
+        .value("COPY", whiteout::models::wem::SoftLumpKind::Copy)
+        .value("SURFACE", whiteout::models::wem::SoftLumpKind::Surface)
+        .value("COUNT", whiteout::models::wem::SoftLumpKind::Count)
+    ;
+
+    py::enum_<whiteout::models::wem::SoftAlong>(m, "SoftAlong", R"doc(The direction an effect moves a point in (§8.1): along the surface's normal, or away from the bones, which is every lump scaling about its pivot.)doc")
+        .value("SURFACE", whiteout::models::wem::SoftAlong::Surface)
+        .value("BONES", whiteout::models::wem::SoftAlong::Bones)
+        .value("COUNT", whiteout::models::wem::SoftAlong::Count)
+    ;
+
+    py::enum_<whiteout::models::wem::SoftAxis>(m, "SoftAxis", R"doc(An axis an effect works along. `Auto` is the region's longest; `Motion` follows the carrier's travel (Squash & stretch); `Bone` names one.)doc")
+        .value("AUTO", whiteout::models::wem::SoftAxis::Auto)
+        .value("UP", whiteout::models::wem::SoftAxis::Up)
+        .value("X", whiteout::models::wem::SoftAxis::X)
+        .value("Y", whiteout::models::wem::SoftAxis::Y)
+        .value("Z", whiteout::models::wem::SoftAxis::Z)
+        .value("BONE", whiteout::models::wem::SoftAxis::Bone)
+        .value("MOTION", whiteout::models::wem::SoftAxis::Motion)
+        .value("COUNT", whiteout::models::wem::SoftAxis::Count)
+    ;
+
+    py::enum_<whiteout::models::wem::SoftComesFrom>(m, "SoftComesFrom", R"doc(What fires an effect that acts at moments (§8.2, §8.9): its spans, the starts of its spans as marks, the clip's events of a name, or colliders.)doc")
+        .value("SPANS", whiteout::models::wem::SoftComesFrom::Spans)
+        .value("TIMES", whiteout::models::wem::SoftComesFrom::Times)
+        .value("EVENTS", whiteout::models::wem::SoftComesFrom::Events)
+        .value("CONTACT", whiteout::models::wem::SoftComesFrom::Contact)
+        .value("COUNT", whiteout::models::wem::SoftComesFrom::Count)
+    ;
+
+    py::enum_<whiteout::models::wem::SoftPulse>(m, "SoftPulse", R"doc(A rhythm on Inflate's Amount.)doc")
+        .value("NONE", whiteout::models::wem::SoftPulse::None)
+        .value("BREATHE", whiteout::models::wem::SoftPulse::Breathe)
+        .value("HEARTBEAT", whiteout::models::wem::SoftPulse::Heartbeat)
+        .value("RATE", whiteout::models::wem::SoftPulse::Rate)
+        .value("COUNT", whiteout::models::wem::SoftPulse::Count)
+    ;
+
+    py::enum_<whiteout::models::wem::SoftBulgeShape>(m, "SoftBulgeShape")
+        .value("ROUND", whiteout::models::wem::SoftBulgeShape::Round)
+        .value("RING", whiteout::models::wem::SoftBulgeShape::Ring)
+        .value("COUNT", whiteout::models::wem::SoftBulgeShape::Count)
+    ;
+
+    py::enum_<whiteout::models::wem::SoftJigglePreset>(m, "SoftJigglePreset")
+        .value("CUSTOM", whiteout::models::wem::SoftJigglePreset::Custom)
+        .value("JELLY", whiteout::models::wem::SoftJigglePreset::Jelly)
+        .value("FAT", whiteout::models::wem::SoftJigglePreset::Fat)
+        .value("MUSCLE", whiteout::models::wem::SoftJigglePreset::Muscle)
+        .value("RUBBER", whiteout::models::wem::SoftJigglePreset::Rubber)
+        .value("WATER_BALLOON", whiteout::models::wem::SoftJigglePreset::WaterBalloon)
+        .value("WATER", whiteout::models::wem::SoftJigglePreset::Water)
+        .value("SLIME", whiteout::models::wem::SoftJigglePreset::Slime)
+        .value("COUNT", whiteout::models::wem::SoftJigglePreset::Count)
+    ;
+
+    py::enum_<whiteout::models::wem::SoftWobblePattern>(m, "SoftWobblePattern")
+        .value("JELLY", whiteout::models::wem::SoftWobblePattern::Jelly)
+        .value("SWAY", whiteout::models::wem::SoftWobblePattern::Sway)
+        .value("ROLL", whiteout::models::wem::SoftWobblePattern::Roll)
+        .value("RANDOM", whiteout::models::wem::SoftWobblePattern::Random)
+        .value("COUNT", whiteout::models::wem::SoftWobblePattern::Count)
+    ;
+
+    py::enum_<whiteout::models::wem::SoftDripPreset>(m, "SoftDripPreset", R"doc(Appended, never reordered: the value is what a record stores.)doc")
+        .value("CUSTOM", whiteout::models::wem::SoftDripPreset::Custom)
+        .value("WAX", whiteout::models::wem::SoftDripPreset::Wax)
+        .value("SLIME", whiteout::models::wem::SoftDripPreset::Slime)
+        .value("BLOOD", whiteout::models::wem::SoftDripPreset::Blood)
+        .value("PAINT", whiteout::models::wem::SoftDripPreset::Paint)
+        .value("CHOCOLATE", whiteout::models::wem::SoftDripPreset::Chocolate)
+        .value("HONEY", whiteout::models::wem::SoftDripPreset::Honey)
+        .value("WATER", whiteout::models::wem::SoftDripPreset::Water)
+        .value("COUNT", whiteout::models::wem::SoftDripPreset::Count)
+    ;
+
+    py::enum_<whiteout::models::wem::SoftNeckLaw>(m, "SoftNeckLaw", R"doc(How a strand's neck thins over time (§8.6): in a straight line, slowly and then at once, without end, or until it sets.)doc")
+        .value("LINEAR", whiteout::models::wem::SoftNeckLaw::Linear)
+        .value("SNAP", whiteout::models::wem::SoftNeckLaw::Snap)
+        .value("THREAD", whiteout::models::wem::SoftNeckLaw::Thread)
+        .value("SETS", whiteout::models::wem::SoftNeckLaw::Sets)
+        .value("COUNT", whiteout::models::wem::SoftNeckLaw::Count)
+    ;
+
+    py::enum_<whiteout::models::wem::SoftSquashMode>(m, "SoftSquashMode")
+        .value("AUTO", whiteout::models::wem::SoftSquashMode::Auto)
+        .value("KEYED", whiteout::models::wem::SoftSquashMode::Keyed)
+        .value("COUNT", whiteout::models::wem::SoftSquashMode::Count)
+    ;
+
+    py::enum_<whiteout::models::wem::SoftAnchor>(m, "SoftAnchor")
+        .value("BOTTOM", whiteout::models::wem::SoftAnchor::Bottom)
+        .value("CENTRE", whiteout::models::wem::SoftAnchor::Centre)
+        .value("PIVOT", whiteout::models::wem::SoftAnchor::Pivot)
+        .value("COUNT", whiteout::models::wem::SoftAnchor::Count)
+    ;
+
+    py::enum_<whiteout::models::wem::SoftMeltOrder>(m, "SoftMeltOrder")
+        .value("TOP", whiteout::models::wem::SoftMeltOrder::Top)
+        .value("BOTTOM", whiteout::models::wem::SoftMeltOrder::Bottom)
+        .value("ALL_AT_ONCE", whiteout::models::wem::SoftMeltOrder::AllAtOnce)
+        .value("COUNT", whiteout::models::wem::SoftMeltOrder::Count)
+    ;
+
+    py::enum_<whiteout::models::wem::SoftRipplePlays>(m, "SoftRipplePlays")
+        .value("ONCE", whiteout::models::wem::SoftRipplePlays::Once)
+        .value("LOOPS", whiteout::models::wem::SoftRipplePlays::Loops)
+        .value("COUNT", whiteout::models::wem::SoftRipplePlays::Count)
+    ;
+
+    py::enum_<whiteout::models::wem::SoftThrough>(m, "SoftThrough")
+        .value("SKIN", whiteout::models::wem::SoftThrough::Skin)
+        .value("BODY", whiteout::models::wem::SoftThrough::Body)
+        .value("COUNT", whiteout::models::wem::SoftThrough::Count)
     ;
 
     py::enum_<whiteout::models::wem::PhysicsShapeKind>(m, "PhysicsShapeKind", R"doc(Appended, never reordered: the value is what a `PSHP` chunk stores.)doc")
@@ -1236,7 +1376,7 @@ Order is insertion order and is stable, because a recorded expected-loss list is
 
 Constant-rate sources fill the rates: D3's `uvTransformMode` family (0..6, 82.7% mode 2), and M3's `texAnimMatrices` where the function is linear. Keyed sources — MDX `TextureAnimation`, M2 texture transforms reached through `textureTransformCombos` — leave the rates zero and put sub-tracks on the feature's `UvTranslate`/`UvRotate`/`UvScale` channels (§10.8).
 
-Both forms compose with `TextureInput::uvTransform`, which stays the static part.)doc")
+`TextureInput::uvTransform` stays the static part. A rate moves on from it. A keyed component REPLACES the static one, and the other components stay as the static part has them: an `.m3` layer's keyed offset plays under its fixed tiling, and every importer writes its keys as whole values, not as offsets from the static part.)doc")
         .def(py::init<>())
         .def_readwrite("scroll_rate", &whiteout::models::wem::UvAnimationFeature::scrollRate, R"doc(UV units per second.)doc")
         .def_readwrite("rotate_rate", &whiteout::models::wem::UvAnimationFeature::rotateRate, R"doc(Radians per second, about the UV centre.)doc")
@@ -1436,6 +1576,30 @@ The vertex is left sorted heaviest first, with ties by bone, which is the order 
         .def_readwrite("flags", &whiteout::models::wem::MeshSection::flags)
         .def_readwrite("bounds", &whiteout::models::wem::MeshSection::bounds, R"doc(Derived, recomputed.)doc")
         .def_readwrite("native", &whiteout::models::wem::MeshSection::native)
+    ;
+
+    py::class_<whiteout::models::wem::Mesh>(m, "Mesh")
+        .def(py::init<>())
+        .def_readwrite("name", &whiteout::models::wem::Mesh::name)
+        .def_readwrite("lod_level", &whiteout::models::wem::Mesh::lodLevel, R"doc(0, or `kAllLods`: a document holds no other level (`DropLevelsOfDetail`, EDIT_MODE_MODELLING_DESIGN.md §8.1).)doc")
+        .def_readwrite("skin", &whiteout::models::wem::Mesh::skin)
+        .def_readwrite("sections", &whiteout::models::wem::Mesh::sections)
+        .def_readwrite("bounds", &whiteout::models::wem::Mesh::bounds)
+        .def("face_set", &whiteout::models::wem::Mesh::faceSet, R"doc(The indexed face set — the mesh's own form.
+
+Regenerated from the connectivity first when an edit has made it stale, so this is always current even mid-edit.)doc")
+        .def("set_face_set", &whiteout::models::wem::Mesh::setFaceSet, py::arg("faces"), R"doc(Replaces the geometry. Drops any connectivity and the stored triangulation, and resizes the Vertex and Face attribute domains to match; Halfedge and Edge domains are sized by `ensureConnectivity`, since only the build knows how many there are.)doc")
+        .def("has_connectivity", &whiteout::models::wem::Mesh::hasConnectivity)
+        .def("ensure_connectivity", &whiteout::models::wem::Mesh::ensureConnectivity, R"doc(Builds the half-edge arrays if they are not already there.
+
+Deterministic and idempotent. Fails only on a non-manifold face set, which `MeshBuilder` cannot produce — a mesh that came through the builder always builds.)doc")
+        .def("invalidate_connectivity", &whiteout::models::wem::Mesh::invalidateConnectivity, R"doc(Drops the half-edge arrays, syncing the face set first if an edit made it stale. When an edit renumbered the connectivity, it is canonicalized first (`geom::Canonicalize`): lazily deleted elements are compacted and the Halfedge and Edge layers carried to the numbering a rebuild gives, so ids held across this call are renumbered. The geometry is unchanged.)doc")
+        .def("topology", py::overload_cast<>(&whiteout::models::wem::Mesh::topology, py::const_))
+        .def("vertex_count", &whiteout::models::wem::Mesh::vertexCount)
+        .def("face_count", &whiteout::models::wem::Mesh::faceCount)
+        .def("face_sections", py::overload_cast<>(&whiteout::models::wem::Mesh::faceSections, py::const_))
+        .def("faces_of_section", &whiteout::models::wem::Mesh::facesOfSection, py::arg("section"), R"doc(Faces belonging to @p section, in face order. A bucket pass at the point of use, which is what replaces the old sorted-range invariant.)doc")
+        .def("recompute_bounds", &whiteout::models::wem::Mesh::recomputeBounds, R"doc(Recomputes `bounds` and every section's `bounds` from `position`.)doc")
     ;
 
     bind_wem_1(m);

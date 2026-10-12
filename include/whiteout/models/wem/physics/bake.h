@@ -33,6 +33,8 @@ namespace whiteout {
 namespace models {
 namespace wem {
 
+struct SoftModesCache;
+
 /// What the host needs for one step of a run.
 struct BakeStep {
     /// Every body's state, in body order.
@@ -175,8 +177,14 @@ struct BakeRun {
 /// A hash of everything a bake of @p clip reads: its tracks and every lead-in
 /// clip's, each from its bake's source; the model's nodes, physics and the
 /// channels the sources key; the settings; and a once-played clip's *Goes to*
-/// as it stands. A bake whose record holds another is out of date.
+/// as it stands. A bake whose record holds another is out of date. No bound is
+/// in it: every one is measured from what the document holds, a bake's own
+/// keys among it, and a save measures them again.
 u64 BakeInputs(const Document& document, u32 clip);
+/// Whether @p clip is baked and its record's key is the one `BakeInputs` gives
+/// now. A record made while the bounds were in the key holds for as long as
+/// they stand. This, and no comparison of the two, is what "out of date" asks.
+bool BakeInDate(const Document& document, u32 clip);
 
 /**
  * @brief Runs @p clip's physics once, from before its start (§6, §7.2).
@@ -225,6 +233,19 @@ struct BakeReport {
         f32 size = 0.0f;
     };
     std::vector<ClothLine> cloths;
+    /// Per soft body the bake carried (soft design §11.2): its id, the lumps
+    /// that got keys and the keys, how far its points are from where a key
+    /// every step had them, and *follows within* over the clip.
+    struct SoftLine {
+        u32 body = 0;
+        u32 lumps = 0;
+        u32 keys = 0;
+        f32 within = 0.0f;
+        f32 follows = 0.0f;
+        f32 push = 0.0f;  ///< A Jiggle's push over its *Limit*, before the ceiling.
+        f32 atEnd = 0.0f; ///< A clip played once: the swing it ends with, over the *Limit*.
+    };
+    std::vector<SoftLine> soft;
     Diagnostics diagnostics;
 };
 
@@ -233,6 +254,11 @@ struct BakeReport {
  *        inside each node's active spans, reduced, and recorded so it can be
  *        undone.
  *
+ * The model's soft bodies come last (soft design §11): stepped on the clip as
+ * those keys now play it, their copies' and surface lumps' departures written
+ * on the lumps' own channels and their bones used as they are keyed in place,
+ * scale included, each only where it departs.
+ *
  * A clip baked before is restored to its source first. A clip on its MDX
  * window is detached. A constraint or IK stage over a node it writes has its
  * weight keyed off there, so the clip plays the recording and not the stage
@@ -240,7 +266,12 @@ struct BakeReport {
  * is what its end is cross-faded into; without it, the target's keys as they
  * stand.
  */
-BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesTo = nullptr);
+BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesTo = nullptr,
+                    SoftModesCache* softModes = nullptr);
+
+/// The steps a run of @p clip takes over the clip itself, and each one's
+/// length: what a preview that is to show what a bake writes steps by.
+u32 BakeStepsOf(const Document& document, u32 clip, f32& dt);
 
 /// Puts back what @p clip's bake replaced, and drops the channels it declared
 /// that nothing keys any more (§8.4). Nothing for a clip not baked. An editor
@@ -258,13 +289,21 @@ void RestoreBakeSources(Document& document);
 std::vector<u32> BakeOrder(const Document& document, std::vector<u32> clips);
 
 /// The clips set up for the bake that are not baked: what an export's *Bake
-/// physics* bakes (§8.6).
+/// physics* bakes (§8.6). A clip a soft body acts in (`SoftActsIn`) is one,
+/// set up or not: its lumps move only in a baked clip's keys.
 std::vector<u32> UnbakedSetUpClips(const Document& document);
+/// Those of them a soft body acts in: what is baked even for a game that runs
+/// its own physics, since none runs a soft body.
+std::vector<u32> UnbakedSoftClips(const Document& document);
 /// The baked clips whose inputs no longer hold (§8.4).
 std::vector<u32> OutOfDateBakes(const Document& document);
 /// Whether @p clip's baked keys were edited since its bake (§8.4): a Rebake
 /// would replace them.
 bool BakedKeysEdited(const Document& document, u32 clip);
+/// What @p clip's bake record holds of the keys it wrote, hashed as they now
+/// stand: what `PhysicsBake::written` is compared with. 0 for a clip not
+/// baked. For an edit that changes what a bake wrote and stands by it.
+u64 BakeWrittenNow(const Document& document, u32 clip);
 
 /**
  * @brief The export's bake (§8.6): every set-up clip not baked yet, in
@@ -273,9 +312,11 @@ bool BakedKeysEdited(const Document& document, u32 clip);
  * A recording in @p runs of a clip whose inputs still hold is written rather
  * than run again, so an export writes what the editor showed. Returns how
  * many clips it baked; one it could not is reported and left as it was.
+ * With @p only, those clips and no other.
  */
 u32 BakeForExport(Document& document, const BakeHooks& hooks,
-                  std::span<const std::shared_ptr<const BakeRun>> runs, Diagnostics& out);
+                  std::span<const std::shared_ptr<const BakeRun>> runs, Diagnostics& out,
+                  const std::vector<u32>* only = nullptr);
 
 } // namespace wem
 } // namespace models

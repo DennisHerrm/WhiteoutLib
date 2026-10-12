@@ -59,6 +59,7 @@ int ChannelLengthPower(const Model& model, const AnimChannel& channel) {
     case Channel::ShadowCastingEnd:
     case Channel::FocusDistance:
     case Channel::ClothDriverTranslation:
+    case Channel::SoftLumpTranslation:
         return 1;
     case Channel::LinearFalloff:
     case Channel::FStop:

@@ -235,7 +235,8 @@ struct Model {
         v.since(6).field("trackSets", trackSets);
         // v7: the pose stages; none before.
         v.since(7).field("poseStages", poseStages);
-        // v8: the physics set; none before.
+        // v8: the physics set; none before. v9: its soft bodies, read inside
+        // `PhysicsSet::reflect`.
         v.since(8).field("physics", physics);
     }
 };

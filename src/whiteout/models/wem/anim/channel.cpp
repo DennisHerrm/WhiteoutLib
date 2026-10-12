@@ -316,6 +316,14 @@ const char* ToString(Channel channel) {
         return "teamColorTextureIndex";
     case Channel::EnvironmentTextureIndex:
         return "environmentTextureIndex";
+    case Channel::SoftAmount:
+        return "softAmount";
+    case Channel::SoftLumpTranslation:
+        return "softLumpTranslation";
+    case Channel::SoftLumpRotation:
+        return "softLumpRotation";
+    case Channel::SoftLumpScale:
+        return "softLumpScale";
     case Channel::Count:
         break;
     }
@@ -349,10 +357,13 @@ geom::AttrType DefaultValueType(Channel channel) {
     case Channel::UvScale:
     case Channel::Target:
     case Channel::ClothDriverTranslation:
+    case Channel::SoftLumpTranslation:
+    case Channel::SoftLumpScale:
         return geom::AttrType::F32x3;
     case Channel::Rotation:
     case Channel::UvRotate:
     case Channel::ClothDriverRotation:
+    case Channel::SoftLumpRotation:
         return geom::AttrType::Quat;
     case Channel::TextureIndex:
     case Channel::NormalTextureIndex:
@@ -385,6 +396,7 @@ geom::AttrType DefaultValueType(Channel channel) {
     case Channel::ClothActive:
     case Channel::PhysicsRagdoll:
     case Channel::PhysicsBlend:
+    case Channel::SoftAmount:
     case Channel::Count:
         break;
     }

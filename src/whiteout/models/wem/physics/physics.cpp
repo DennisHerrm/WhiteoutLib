@@ -275,6 +275,9 @@ bool FollowShapes(PhysicsSet& physics) {
     for (Cloth& cloth : physics.cloths) {
         std::erase_if(cloth.colliders, isGone);
     }
+    for (SoftBody& soft : physics.soft) {
+        std::erase_if(soft.colliders, isGone);
+    }
     return true;
 }
 
@@ -329,9 +332,17 @@ const PhysicsRig* PhysicsSet::rig(u32 id) const {
     return FindById(rigs, id);
 }
 
+const SoftBody* PhysicsSet::softBody(u32 id) const {
+    return FindById(soft, id);
+}
+
+SoftBody* PhysicsSet::softBody(u32 id) {
+    return FindById(soft, id);
+}
+
 bool PhysicsSet::hasId(u32 id) const {
     return body(id) != nullptr || joint(id) != nullptr || collider(id) != nullptr ||
-           cloth(id) != nullptr || rig(id) != nullptr;
+           cloth(id) != nullptr || rig(id) != nullptr || softBody(id) != nullptr;
 }
 
 const PhysicsBody* PhysicsSet::firstBodyOn(u32 node) const {

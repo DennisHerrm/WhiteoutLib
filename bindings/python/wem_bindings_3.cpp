@@ -41,6 +41,7 @@
 #include <whiteout/models/wem/nodes/tree.h>
 #include <whiteout/models/wem/anim/channel.h>
 #include <whiteout/models/wem/anim/clip.h>
+#include <whiteout/models/wem/physics/soft.h>
 #include <whiteout/models/wem/physics/physics.h>
 #include <whiteout/models/wem/physics/materials.h>
 #include <whiteout/models/wem/model.h>
@@ -90,6 +91,10 @@ PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::ProfileMaterialSet>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::Sc2Property<whiteout::Vector3f>>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::Sc2RibbonSplinePoint>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SlotBinding>);
+PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SoftBody>);
+PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SoftEffect>);
+PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SoftLump>);
+PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SoftPart>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SubTrack>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SubTrackContainer>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::TextureRef>);
@@ -164,7 +169,6 @@ auto bindBufferVector(py::module_& m, const char* name) {
 } // namespace
 // Part 3 of bind_wem(), which calls the parts in order.
 void bind_wem_3(py::module_& m) {
-    py::bind_vector<std::vector<whiteout::models::wem::Diagnostics::CodeCount>>(m, "VectorDiagnosticsCodeCount");
     py::bind_vector<std::vector<whiteout::models::wem::Look>>(m, "VectorWemLook");
     py::bind_vector<std::vector<whiteout::models::wem::Material>>(m, "VectorWemMaterial");
     py::bind_vector<std::vector<whiteout::models::wem::MaterialFeature>>(m, "VectorWemMaterialFeature");
@@ -183,6 +187,10 @@ void bind_wem_3(py::module_& m) {
     py::bind_vector<std::vector<whiteout::models::wem::Sc2Property<whiteout::Vector3f>>>(m, "VectorWemSc2PropertyVector3f");
     py::bind_vector<std::vector<whiteout::models::wem::Sc2RibbonSplinePoint>>(m, "VectorWemSc2RibbonSplinePoint");
     py::bind_vector<std::vector<whiteout::models::wem::SlotBinding>>(m, "VectorWemSlotBinding");
+    py::bind_vector<std::vector<whiteout::models::wem::SoftBody>>(m, "VectorWemSoftBody");
+    py::bind_vector<std::vector<whiteout::models::wem::SoftEffect>>(m, "VectorWemSoftEffect");
+    py::bind_vector<std::vector<whiteout::models::wem::SoftLump>>(m, "VectorWemSoftLump");
+    py::bind_vector<std::vector<whiteout::models::wem::SoftPart>>(m, "VectorWemSoftPart");
     py::bind_vector<std::vector<whiteout::models::wem::SubTrack>>(m, "VectorWemSubTrack");
     py::bind_vector<std::vector<whiteout::models::wem::SubTrackContainer>>(m, "VectorWemSubTrackContainer");
     py::bind_vector<std::vector<whiteout::models::wem::TextureRef>>(m, "VectorWemTextureRef");

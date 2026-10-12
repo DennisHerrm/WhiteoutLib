@@ -190,6 +190,24 @@ inline constexpr const char* kFractureSkinWeight = "fracture.skin.weight";
 /// a file's 16-bit indices (`FractureSpec::mostVertices`).
 inline constexpr const char* kFractureSection = "fracture.section";
 
+// The Workshop's soft bodies (EDIT_MODE_SOFTBODY_DESIGN.md §13). Authoring
+// state, like the Fracture's, and stored + 1 for the same reason: a point a
+// later edit adds is in no body and names no lump.
+/// Vertex / U32: the soft body the point is in (`SoftBody::id`); 0 is none.
+inline constexpr const char* kSoftBody = "soft.body";
+/// Vertex / F32: the softness asked for, 0 to 1, before a crowded skin lowers it.
+inline constexpr const char* kSoftSoftness = "soft.softness";
+/// Vertex / Bool: the softness was painted, and a remake keeps it.
+inline constexpr const char* kSoftPainted = "soft.painted";
+/// Vertex / Bool: the point joined its body with a part that rides, and leaves
+/// with it. A point the region held, painted stiff by hand, is not one.
+inline constexpr const char* kSoftJoined = "soft.joined";
+/// Vertex / U32x4: the solved lanes' surface lumps, as indices + 1 into
+/// `SoftBody::lumps`. Lump numbers, not vertex ids: never a reference layer.
+inline constexpr const char* kSoftBindLump = "soft.bind.lump";
+/// Vertex / F32x4: the influence each of those lumps takes.
+inline constexpr const char* kSoftBindWeight = "soft.bind.weight";
+
 /// "uv0", "uv1", … Valid for @p index < 8; the string is built, not interned.
 std::string uv(u32 index);
 /// "color0", "color1", …

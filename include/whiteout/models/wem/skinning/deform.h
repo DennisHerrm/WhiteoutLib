@@ -61,6 +61,12 @@ std::vector<Vector3f> DeformMesh(const Mesh& mesh, std::span<const Matrix44f> sk
  */
 std::vector<Vector3f> DeformNormals(const Mesh& mesh, std::span<const Matrix44f> skin);
 
+/// The same, each vertex bound by @p written (one entry a vertex), as
+/// `DeformMesh` takes it: what skins a mesh whose influences are not its own,
+/// a soft body's lumps among them.
+std::vector<Vector3f> DeformNormals(const Mesh& mesh, std::span<const Matrix44f> skin,
+                                    std::span<const std::vector<geom::Influence>> written);
+
 } // namespace skinning
 } // namespace wem
 } // namespace models

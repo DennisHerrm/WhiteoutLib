@@ -58,6 +58,7 @@ CONFIG = ModuleConfig(
         'include/whiteout/models/wem/nodes/tree.h',
         'include/whiteout/models/wem/anim/channel.h',
         'include/whiteout/models/wem/anim/clip.h',
+        'include/whiteout/models/wem/physics/soft.h',
         'include/whiteout/models/wem/physics/physics.h',
         'include/whiteout/models/wem/physics/materials.h',
         'include/whiteout/models/wem/model.h',

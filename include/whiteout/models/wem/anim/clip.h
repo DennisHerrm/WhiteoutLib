@@ -357,6 +357,31 @@ struct PhysicsBake {
     std::vector<u32> clothIds;
     std::vector<f32> clothFits;
     std::vector<f32> clothSizes;
+    /// Each soft body the bake carried (EDIT_MODE_SOFTBODY_DESIGN.md §11.2): its
+    /// id, how many of its lumps got keys and how many keys, how far its points
+    /// are from where a key every step had them (model units), and *follows
+    /// within* over the clip (§6.6).
+    std::vector<u32> softIds;
+    std::vector<u32> softLumps;
+    std::vector<u32> softKeys;
+    std::vector<f32> softWithin;
+    std::vector<f32> softFollows;
+    /// Where a Jiggle acted: the farthest its push would have swung the body,
+    /// over its *Limit*, before the ceiling (over 1, it was limited); and for a
+    /// clip played once, how much of a swing it ends with. 0 where none acted.
+    std::vector<f32> softPush;
+    std::vector<f32> softAtEnd;
+    /// The node channels the soft bodies keyed in place, for their bones used
+    /// as they are: what `source` holds of them is the pose the soft bodies
+    /// were stepped on (`SoftSourcePose`).
+    std::vector<u32> softChannels;
+    /// For one of those that a rigid body's bake had keyed first: the keys it
+    /// left, which the soft bodies were stepped on and wrote over. `source`
+    /// holds what the clip had before either.
+    std::vector<SubTrackContainer> softSource;
+    /// The bake added the clip's settings to hold this record: the clip was not
+    /// set up (`IsSetUp`), and an Unbake leaves it so.
+    bool madeSettings = false;
 
     template <class V>
     void reflect(V& v) {
@@ -376,6 +401,16 @@ struct PhysicsBake {
         v.since(6).field("clothIds", clothIds);
         v.since(6).field("clothFits", clothFits);
         v.since(6).field("clothSizes", clothSizes);
+        v.since(7).field("softIds", softIds);
+        v.since(7).field("softLumps", softLumps);
+        v.since(7).field("softKeys", softKeys);
+        v.since(7).field("softWithin", softWithin);
+        v.since(7).field("softFollows", softFollows);
+        v.since(7).field("softPush", softPush);
+        v.since(7).field("softAtEnd", softAtEnd);
+        v.since(7).field("softChannels", softChannels);
+        v.since(7).field("softSource", softSource);
+        v.since(7).field("madeSettings", madeSettings);
     }
 };
 
@@ -508,6 +543,22 @@ struct Clip {
         v.since(5).optional("physics", physics);
     }
 };
+
+/// Whether @p clip is set up for the bake: it has settings, and they are its
+/// own, not what a bake of a clip that had none added to hold its record.
+inline bool IsSetUp(const Clip& clip) {
+    return clip.physics.has_value() && !(clip.physics->baked.has_value() && clip.physics->baked->madeSettings);
+}
+
+/// @p clip set up, as an edit of its settings or of what its physics does in
+/// it leaves it: settings a bake added are its own from here.
+inline void SetUpClip(Clip& clip) {
+    if (!clip.physics.has_value()) {
+        clip.physics.emplace();
+    } else if (clip.physics->baked.has_value()) {
+        clip.physics->baked->madeSettings = false;
+    }
+}
 
 /**
  * @brief @p clip's containers as a layering format writes them: container 0

@@ -271,6 +271,46 @@ TEST_CASE("wem select linked stops at the delimits asked for", "[wem][geometry][
     vertex.vertices = verticesAt(mesh, {{0, 0}});
     CHECK(geom::Linked(mesh, points, vertex, LinkDelimit::Seam).vertices.size() == 15u);
 }
+
+TEST_CASE("wem select by material takes the faces of every section that draws with it",
+          "[wem][geometry][select]") {
+    // Three sections: columns 0-1 and column 3 draw with slot 5, column 2 with slot 2.
+    Mesh mesh = grid(4, 4);
+    mesh.sections[0].materialSlot = 5;
+    mesh.sections.emplace_back().materialSlot = 2;
+    mesh.sections.emplace_back().materialSlot = 5;
+    const std::span<u32> sections = mesh.faceSections();
+    for (u32 y = 0; y < 4; ++y) {
+        sections[cellAt(mesh, 2, static_cast<f32>(y))] = 1;
+        sections[cellAt(mesh, 3, static_cast<f32>(y))] = 2;
+    }
+    const u32 five[] = {5};
+    const u32 two[] = {2};
+    const u32 both[] = {2, 5};
+    const u32 unused[] = {7};
+    const ElementSet onFive = geom::FacesOfMaterials(mesh, five);
+    CHECK(onFive.faces.size() == 12u);
+    CHECK(std::is_sorted(onFive.faces.begin(), onFive.faces.end()));
+    CHECK(onFive.vertices.empty());
+    for (u32 y = 0; y < 4; ++y) {
+        CHECK(std::binary_search(onFive.faces.begin(), onFive.faces.end(), cellAt(mesh, 3, static_cast<f32>(y))));
+        CHECK(!std::binary_search(onFive.faces.begin(), onFive.faces.end(), cellAt(mesh, 2, static_cast<f32>(y))));
+    }
+    CHECK(geom::FacesOfMaterials(mesh, two).faces.size() == 4u);
+    CHECK(geom::FacesOfMaterials(mesh, both).faces.size() == 16u);
+    // A slot no section uses, and no slot at all.
+    CHECK(geom::FacesOfMaterials(mesh, unused).empty());
+    CHECK(geom::FacesOfMaterials(mesh, {}).empty());
+
+    // A mesh of one section is all of it or none; no connectivity is needed.
+    Mesh one = grid(2, 2);
+    one.sections[0].materialSlot = 3;
+    one.invalidateConnectivity();
+    const u32 three[] = {3};
+    CHECK(geom::FacesOfMaterials(one, three).faces.size() == 4u);
+    CHECK(geom::FacesOfMaterials(one, five).empty());
+}
+
 TEST_CASE("wem select sharp takes the edges whose faces fold", "[wem][geometry][select]") {
     // A box folds at a right angle everywhere, so every edge is sharp above 60
     // degrees and none of them is above 100.

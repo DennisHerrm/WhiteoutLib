@@ -199,6 +199,17 @@ target_include_directories(wem_physics_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 # played-once names, the lead-ins and the clip's settings.
 whiteout_add_test(wem_physics_bake_test wem_physics_bake_test.cpp)
 target_include_directories(wem_physics_bake_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+# Workshop ▸ Soft Body (EDIT_MODE_SOFTBODY_PLAN.md): the region, the lumps,
+# the lanes, the skin a file holds.
+whiteout_add_test(wem_soft_test wem_soft_test.cpp)
+target_include_directories(wem_soft_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+# Its fit (plan S3): what the lumps follow exactly, and the fast solve against the reference.
+whiteout_add_test(wem_soft_fit_test wem_soft_fit_test.cpp)
+whiteout_add_test(wem_soft_bake_test wem_soft_bake_test.cpp)
+whiteout_add_test(wem_soft_modes_test wem_soft_modes_test.cpp)
+whiteout_add_test(wem_soft_shapes_test wem_soft_shapes_test.cpp)
+whiteout_add_test(wem_soft_drip_test wem_soft_drip_test.cpp)
+target_include_directories(wem_soft_modes_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 whiteout_add_test(wem_physics_materials_test wem_physics_materials_test.cpp)
 whiteout_add_test(wem_physics_m2_test wem_physics_m2_test.cpp)
 target_include_directories(wem_physics_m2_test PRIVATE ${CMAKE_SOURCE_DIR}/src)

@@ -518,6 +518,38 @@ u32 DropClothForProfile(Document& document, ProfileId target, Diagnostics& out) 
     return dropped;
 }
 
+bool CarriesSoft(const Document& document) {
+    return std::any_of(document.models.begin(), document.models.end(),
+                       [](const Model& model) { return !model.physics.soft.empty(); });
+}
+
+u32 DropSoftForProfile(Document& document, ProfileId target, Diagnostics& out) {
+    u32 dropped = 0;
+    for (u32 m = 0; m < document.models.size(); ++m) {
+        Model& model = document.models[m];
+        // The channels go whether or not a body is left to name them.
+        std::vector<u32> channels;
+        for (const AnimChannel& channel : model.animChannels.channels) {
+            if (channel.target.kind == TrackTarget::Kind::Physics && IsSoftChannel(channel.target.channel)) {
+                channels.push_back(channel.id);
+            }
+        }
+        if (!channels.empty()) {
+            EraseChannels(document, m, channels);
+        }
+        for (const SoftBody& body : model.physics.soft) {
+            out.info(DiagCode::PhysicsUnsupported, "soft body '" + body.name + "' left out: a file holds its bones and keys",
+                     ElementRef(ElementKind::PhysicsRecord, body.id), target);
+            ++dropped;
+        }
+        model.physics.soft.clear();
+        for (Mesh& mesh : model.meshes) {
+            DropSoftLayers(mesh);
+        }
+    }
+    return dropped;
+}
+
 bool IsDeathClipName(std::string_view name) {
     constexpr std::string_view kDeath = "death";
     if (name.size() < kDeath.size()) {

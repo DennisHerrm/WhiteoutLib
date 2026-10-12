@@ -41,6 +41,7 @@
 #include <whiteout/models/wem/nodes/tree.h>
 #include <whiteout/models/wem/anim/channel.h>
 #include <whiteout/models/wem/anim/clip.h>
+#include <whiteout/models/wem/physics/soft.h>
 #include <whiteout/models/wem/physics/physics.h>
 #include <whiteout/models/wem/physics/materials.h>
 #include <whiteout/models/wem/model.h>
@@ -90,6 +91,10 @@ PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::ProfileMaterialSet>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::Sc2Property<whiteout::Vector3f>>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::Sc2RibbonSplinePoint>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SlotBinding>);
+PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SoftBody>);
+PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SoftEffect>);
+PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SoftLump>);
+PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SoftPart>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SubTrack>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::SubTrackContainer>);
 PYBIND11_MAKE_OPAQUE(std::vector<whiteout::models::wem::TextureRef>);
@@ -164,30 +169,6 @@ auto bindBufferVector(py::module_& m, const char* name) {
 } // namespace
 // Part 1 of bind_wem(), which calls the parts in order.
 void bind_wem_1(py::module_& m) {
-    py::class_<whiteout::models::wem::Mesh>(m, "Mesh")
-        .def(py::init<>())
-        .def_readwrite("name", &whiteout::models::wem::Mesh::name)
-        .def_readwrite("lod_level", &whiteout::models::wem::Mesh::lodLevel, R"doc(0, or `kAllLods`: a document holds no other level (`DropLevelsOfDetail`, EDIT_MODE_MODELLING_DESIGN.md §8.1).)doc")
-        .def_readwrite("skin", &whiteout::models::wem::Mesh::skin)
-        .def_readwrite("sections", &whiteout::models::wem::Mesh::sections)
-        .def_readwrite("bounds", &whiteout::models::wem::Mesh::bounds)
-        .def("face_set", &whiteout::models::wem::Mesh::faceSet, R"doc(The indexed face set — the mesh's own form.
-
-Regenerated from the connectivity first when an edit has made it stale, so this is always current even mid-edit.)doc")
-        .def("set_face_set", &whiteout::models::wem::Mesh::setFaceSet, py::arg("faces"), R"doc(Replaces the geometry. Drops any connectivity and the stored triangulation, and resizes the Vertex and Face attribute domains to match; Halfedge and Edge domains are sized by `ensureConnectivity`, since only the build knows how many there are.)doc")
-        .def("has_connectivity", &whiteout::models::wem::Mesh::hasConnectivity)
-        .def("ensure_connectivity", &whiteout::models::wem::Mesh::ensureConnectivity, R"doc(Builds the half-edge arrays if they are not already there.
-
-Deterministic and idempotent. Fails only on a non-manifold face set, which `MeshBuilder` cannot produce — a mesh that came through the builder always builds.)doc")
-        .def("invalidate_connectivity", &whiteout::models::wem::Mesh::invalidateConnectivity, R"doc(Drops the half-edge arrays, syncing the face set first if an edit made it stale. When an edit renumbered the connectivity, it is canonicalized first (`geom::Canonicalize`): lazily deleted elements are compacted and the Halfedge and Edge layers carried to the numbering a rebuild gives, so ids held across this call are renumbered. The geometry is unchanged.)doc")
-        .def("topology", py::overload_cast<>(&whiteout::models::wem::Mesh::topology, py::const_))
-        .def("vertex_count", &whiteout::models::wem::Mesh::vertexCount)
-        .def("face_count", &whiteout::models::wem::Mesh::faceCount)
-        .def("face_sections", py::overload_cast<>(&whiteout::models::wem::Mesh::faceSections, py::const_))
-        .def("faces_of_section", &whiteout::models::wem::Mesh::facesOfSection, py::arg("section"), R"doc(Faces belonging to @p section, in face order. A bucket pass at the point of use, which is what replaces the old sorted-range invariant.)doc")
-        .def("recompute_bounds", &whiteout::models::wem::Mesh::recomputeBounds, R"doc(Recomputes `bounds` and every section's `bounds` from `position`.)doc")
-    ;
-
     py::class_<whiteout::models::wem::Wc3ParticleEmitter1Payload>(m, "Wc3ParticleEmitter1Payload", R"doc(`PREM`: every particle is a copy of `spawnModel`, flung from the node.)doc")
         .def(py::init<>())
         .def_readwrite("emission_rate", &whiteout::models::wem::Wc3ParticleEmitter1Payload::emissionRate, R"doc(Particles a second.)doc")
@@ -893,6 +874,16 @@ Every clip also plays the "default" set — whatever no listed set claims — in
         .def_readwrite("cloth_ids", &whiteout::models::wem::PhysicsBake::clothIds, R"doc(Each cloth the bake carried (EDIT_MODE_PHYSICS_CLOTH_DESIGN.md §10.2): its id, how far its bones missed it (0 in full detail), and its size.)doc")
         .def_readwrite("cloth_fits", &whiteout::models::wem::PhysicsBake::clothFits)
         .def_readwrite("cloth_sizes", &whiteout::models::wem::PhysicsBake::clothSizes)
+        .def_readwrite("soft_ids", &whiteout::models::wem::PhysicsBake::softIds, R"doc(Each soft body the bake carried (EDIT_MODE_SOFTBODY_DESIGN.md §11.2): its id, how many of its lumps got keys and how many keys, how far its points are from where a key every step had them (model units), and *follows within* over the clip (§6.6).)doc")
+        .def_readwrite("soft_lumps", &whiteout::models::wem::PhysicsBake::softLumps)
+        .def_readwrite("soft_keys", &whiteout::models::wem::PhysicsBake::softKeys)
+        .def_readwrite("soft_within", &whiteout::models::wem::PhysicsBake::softWithin)
+        .def_readwrite("soft_follows", &whiteout::models::wem::PhysicsBake::softFollows)
+        .def_readwrite("soft_push", &whiteout::models::wem::PhysicsBake::softPush, R"doc(Where a Jiggle acted: the farthest its push would have swung the body, over its *Limit*, before the ceiling (over 1, it was limited); and for a clip played once, how much of a swing it ends with. 0 where none acted.)doc")
+        .def_readwrite("soft_at_end", &whiteout::models::wem::PhysicsBake::softAtEnd)
+        .def_readwrite("soft_channels", &whiteout::models::wem::PhysicsBake::softChannels, R"doc(The node channels the soft bodies keyed in place, for their bones used as they are: what `source` holds of them is the pose the soft bodies were stepped on (`SoftSourcePose`).)doc")
+        .def_readwrite("soft_source", &whiteout::models::wem::PhysicsBake::softSource, R"doc(For one of those that a rigid body's bake had keyed first: the keys it left, which the soft bodies were stepped on and wrote over. `source` holds what the clip had before either.)doc")
+        .def_readwrite("made_settings", &whiteout::models::wem::PhysicsBake::madeSettings, R"doc(The bake added the clip's settings to hold this record: the clip was not set up (`IsSetUp`), and an Unbake leaves it so.)doc")
     ;
 
     py::class_<whiteout::models::wem::ClipPhysics>(m, "ClipPhysics", R"doc(One clip's bake settings (§9.2): a clip is *set up* once it has them.)doc")
@@ -953,68 +944,209 @@ D3's `.ans` is the shape this exists for: 30 tag maps in one asset, one core and
         .def_readwrite("base_anim_set", &whiteout::models::wem::AnimSet::baseAnimSet, R"doc(-> `Document::animSets[]`.)doc")
     ;
 
-    py::class_<whiteout::models::wem::PhysicsMaterial>(m, "PhysicsMaterial")
+    py::class_<whiteout::models::wem::SoftPart>(m, "SoftPart", R"doc(A mesh, or the part of one that draws with a material.)doc")
         .def(py::init<>())
-        .def_readwrite("density", &whiteout::models::wem::PhysicsMaterial::density, R"doc(The StarCraft II upgrade's default.)doc")
-        .def_readwrite("friction", &whiteout::models::wem::PhysicsMaterial::friction)
-        .def_readwrite("restitution", &whiteout::models::wem::PhysicsMaterial::restitution)
+        .def_readwrite("mesh", &whiteout::models::wem::SoftPart::mesh)
+        .def_readwrite("material", &whiteout::models::wem::SoftPart::material, R"doc(A material slot; none is the whole mesh.)doc")
     ;
 
-    py::class_<whiteout::models::wem::PhysicsShape>(m, "PhysicsShape")
+    py::class_<whiteout::models::wem::SoftPlace>(m, "SoftPlace", R"doc(A place on the region's surface, which rides it: a bulge's middle, a ripple's source.)doc")
         .def(py::init<>())
-        .def_readwrite("kind", &whiteout::models::wem::PhysicsShape::kind)
-        .def_readwrite("half_extents", &whiteout::models::wem::PhysicsShape::halfExtents, R"doc(Box.)doc")
-        .def_readwrite("radius", &whiteout::models::wem::PhysicsShape::radius, R"doc(Sphere, capsule, cylinder.)doc")
-        .def_readwrite("length", &whiteout::models::wem::PhysicsShape::length, R"doc(Along own +Z, centred: a cylinder's whole, and a capsule's between its cap centres when it does not state them in `points`.)doc")
-        .def_readwrite("points", &whiteout::models::wem::PhysicsShape::points, R"doc(Own frame. A convex hull's vertex set; a capsule's two cap centres when the source states its ends (World of Warcraft, Diablo III), which a centred frame cannot hold to the bit.)doc")
-        .def_readwrite("vertices", &whiteout::models::wem::PhysicsShape::vertices, R"doc(Triangle mesh, own frame.)doc")
-        .def_readwrite("triangles", &whiteout::models::wem::PhysicsShape::triangles, R"doc(Triangle mesh, three per face.)doc")
-        .def_readwrite("material", &whiteout::models::wem::PhysicsShape::material)
-        .def_readwrite("game_flags", &whiteout::models::wem::PhysicsShape::gameFlags, R"doc(Domino's fixture `gameFlags`, for a game's contact callbacks. World of Warcraft authors it (0 in every shipped shape).)doc")
+        .def_readwrite("mesh", &whiteout::models::wem::SoftPlace::mesh)
+        .def_readwrite("face", &whiteout::models::wem::SoftPlace::face)
+        .def_readwrite("weights", &whiteout::models::wem::SoftPlace::weights, R"doc(Barycentric, in the face's first triangle.)doc")
+        .def_readwrite("radius", &whiteout::models::wem::SoftPlace::radius, R"doc(Model units; 0 is a point.)doc")
     ;
 
-    py::class_<whiteout::models::wem::Sc2BodyExtension>(m, "Sc2BodyExtension", R"doc(What only StarCraft II means by a body.)doc")
+    py::class_<whiteout::models::wem::SoftLump>(m, "SoftLump")
         .def(py::init<>())
-        .def_readwrite("physics_material", &whiteout::models::wem::Sc2BodyExtension::physicsMaterial, R"doc(`physicsType`: a material id game data may override.)doc")
-        .def_readwrite("collidable", &whiteout::models::wem::Sc2BodyExtension::collidable, R"doc(Flag 0x1.   } The collision filter.)doc")
-        .def_readwrite("walkable", &whiteout::models::wem::Sc2BodyExtension::walkable, R"doc(Flag 0x2.   })doc")
-        .def_readwrite("stackable", &whiteout::models::wem::Sc2BodyExtension::stackable, R"doc(Flag 0x4.   })doc")
-        .def_readwrite("simulate_collision", &whiteout::models::wem::Sc2BodyExtension::simulateCollision, R"doc(Flag 0x8.   })doc")
-        .def_readwrite("keeps_bone_driven", &whiteout::models::wem::Sc2BodyExtension::keepsBoneDriven, R"doc(Flag 0x80: setup and deactivation leave the bone's physics bit.)doc")
-        .def_readwrite("untraced_flags", &whiteout::models::wem::Sc2BodyExtension::untracedFlags, R"doc(Flags 0x10, 0x20 and 0x200: consistently authored, no reader found in the client yet (WEM_PHYSICS_DESIGN.md §14), so kept as they came.)doc")
+        .def_readwrite("kind", &whiteout::models::wem::SoftLump::kind)
+        .def_readwrite("anchor", &whiteout::models::wem::SoftLump::anchor, R"doc(On the surface, or its bone's pivot, at the bind: what lanes are solved from.)doc")
+        .def_readwrite("rest", &whiteout::models::wem::SoftLump::rest, R"doc(Its pivot, model space, at the bind (§6.1).)doc")
+        .def_readwrite("depth", &whiteout::models::wem::SoftLump::depth, R"doc(Half the body's thickness under it: Blobify's ball.)doc")
+        .def_readwrite("clear", &whiteout::models::wem::SoftLump::clear, R"doc(The space between its points and the things inside, at the bind (§5.4); 0 is none to keep.)doc")
+        .def_readwrite("carrier", &whiteout::models::wem::SoftLump::carrier, R"doc(The bone it hangs from (§6.3). `Bone`: its parent, or none.)doc")
+        .def_readwrite("node", &whiteout::models::wem::SoftLump::node, R"doc(`Bone`: the bone that is the lump. `Copy`: the bone it copies.)doc")
+        .def_readwrite("effect", &whiteout::models::wem::SoftLump::effect, R"doc(The effect whose place claimed it; 0 is none.)doc")
+        .def_readwrite("rider", &whiteout::models::wem::SoftLump::rider, R"doc(The part it carries rigidly: its place in the body's `riders` + 1 (§5.4).)doc")
+        .def_readwrite("swings", &whiteout::models::wem::SoftLump::swings, R"doc(Jiggle moves it (§8.3). A yes or no, never a stiffness.)doc")
+        .def_readwrite("rigid", &whiteout::models::wem::SoftLump::rigid, R"doc(A rigid part's lump: it never scales (§5.4).)doc")
     ;
 
-    py::class_<whiteout::models::wem::WowBodyExtension>(m, "WowBodyExtension", R"doc(What only World of Warcraft means by a body: its kinematic drive and how the runtime groups bodies (`PHYS_FORMAT.md` §3.1, §4.6).)doc")
+    py::class_<whiteout::models::wem::SoftInflate>(m, "SoftInflate", R"doc(§8.1. The Amount is a share of the volume: 0.3 swells by 30 %.)doc")
         .def(py::init<>())
-        .def_readwrite("follow_factor", &whiteout::models::wem::WowBodyExtension::followFactor, R"doc(The fraction of the way a kinematic body is snapped to its bone each step, before the fast-motion ramp takes over. Not a Domino parameter.)doc")
-        .def_readwrite("has_children", &whiteout::models::wem::WowBodyExtension::hasChildren, R"doc(A kinematic body other bodies hang off: its snap carries them.)doc")
-        .def_readwrite("ragdoll_root", &whiteout::models::wem::WowBodyExtension::ragdollRoot, R"doc(The ragdoll's root: its snap carries the groups of kinematic bodies that have no children.)doc")
-        .def_readwrite("parent", &whiteout::models::wem::WowBodyExtension::parent, R"doc(A dynamic body: the kinematic body it hangs off, by id. 0 writes as the first body, as the file's own zero does.)doc")
+        .def_readwrite("along", &whiteout::models::wem::SoftInflate::along)
+        .def_readwrite("toward_place", &whiteout::models::wem::SoftInflate::towardPlace, R"doc(Swells most at the effect's place, fading over its radius.)doc")
+        .def_readwrite("round", &whiteout::models::wem::SoftInflate::round, R"doc(0 keeps the creases; 1 swells toward the body's blob. Along the surface only.)doc")
+        .def_readwrite("keep_volume", &whiteout::models::wem::SoftInflate::keepVolume)
+        .def_readwrite("pulse", &whiteout::models::wem::SoftInflate::pulse)
+        .def_readwrite("rate", &whiteout::models::wem::SoftInflate::rate, R"doc(Beats a second.)doc")
+        .def_readwrite("depth", &whiteout::models::wem::SoftInflate::depth, R"doc(How far the pulse falls back between beats.)doc")
+        .def_readwrite("smooth", &whiteout::models::wem::SoftInflate::smooth, R"doc(Passes that even the normals. Along the surface only.)doc")
     ;
 
-    py::class_<whiteout::models::wem::PhysicsBody>(m, "PhysicsBody")
+    py::class_<whiteout::models::wem::SoftBulge>(m, "SoftBulge", R"doc(§8.2. The Amount is the height, a share of the place's radius; negative is a dent.)doc")
         .def(py::init<>())
-        .def_readwrite("id", &whiteout::models::wem::PhysicsBody::id)
-        .def_readwrite("node", &whiteout::models::wem::PhysicsBody::node)
-        .def_readwrite("motion", &whiteout::models::wem::PhysicsBody::motion)
-        .def_readwrite("simulates", &whiteout::models::wem::PhysicsBody::simulates, R"doc(The rest value of `Channel::PhysicsDynamic`: whether it simulates where no key says otherwise.)doc")
-        .def_readwrite("shapes", &whiteout::models::wem::PhysicsBody::shapes)
-        .def_readwrite("linear_damping", &whiteout::models::wem::PhysicsBody::linearDamping)
-        .def_readwrite("angular_damping", &whiteout::models::wem::PhysicsBody::angularDamping)
-        .def_readwrite("inertia_scale", &whiteout::models::wem::PhysicsBody::inertiaScale)
-        .def_readwrite("gravity_scale", &whiteout::models::wem::PhysicsBody::gravityScale, R"doc(StarCraft II hard-wires 1; World of Warcraft authors it.)doc")
-        .def_readwrite("inherit_dynamic", &whiteout::models::wem::PhysicsBody::inheritDynamic, R"doc(Takes the nearest bodied ancestor's current state instead of its own (StarCraft II flag 0x40).)doc")
-        .def_readwrite("exempt_from_ragdoll", &whiteout::models::wem::PhysicsBody::exemptFromRagdoll, R"doc(Stays kinematic when the model ragdolls (StarCraft II flag 0x100).)doc")
-        .def_readwrite("force_channels", &whiteout::models::wem::PhysicsBody::forceChannels, R"doc(Which force fields act on it: matched against `ForceFieldPayload::channels`. StarCraft II's `localForces | worldForces << 16`.)doc")
-        .def_readwrite("sc2", &whiteout::models::wem::PhysicsBody::sc2)
-        .def_readwrite("wow", &whiteout::models::wem::PhysicsBody::wow)
-        .def_readwrite("locked", &whiteout::models::wem::PhysicsBody::locked, R"doc(Tuned by hand: the editor's tools that run over a whole ragdoll leave its shapes alone (EDIT_MODE_PHYSICS_REDESIGN.md §8.7). Authoring state; no export reads it.)doc")
+        .def_readwrite("along", &whiteout::models::wem::SoftBulge::along)
+        .def_readwrite("shape", &whiteout::models::wem::SoftBulge::shape)
+        .def_readwrite("keep_volume", &whiteout::models::wem::SoftBulge::keepVolume)
+        .def_readwrite("from", &whiteout::models::wem::SoftBulge::from)
+        .def_readwrite("event", &whiteout::models::wem::SoftBulge::event, R"doc(`Events`: the clip events' name.)doc")
+        .def_readwrite("rise", &whiteout::models::wem::SoftBulge::rise, R"doc(An impact's rise and fall, seconds.)doc")
+        .def_readwrite("fall", &whiteout::models::wem::SoftBulge::fall)
+        .def_readwrite("travels", &whiteout::models::wem::SoftBulge::travels)
+        .def_readwrite("chain", &whiteout::models::wem::SoftBulge::chain, R"doc(`travels`: along these bones, in order; node indices.)doc")
+        .def_readwrite("line", &whiteout::models::wem::SoftBulge::line, R"doc(... or along this line over the surface, model space at the bind.)doc")
     ;
 
-    py::class_<whiteout::models::wem::JointSpring>(m, "JointSpring")
+    py::class_<whiteout::models::wem::SoftJiggle>(m, "SoftJiggle", R"doc(§8.3. One model for the body: none of these is set per lump or per bone.)doc")
         .def(py::init<>())
-        .def_readwrite("hz", &whiteout::models::wem::JointSpring::hz)
-        .def_readwrite("damping", &whiteout::models::wem::JointSpring::damping)
+        .def_readwrite("preset", &whiteout::models::wem::SoftJiggle::preset)
+        .def_readwrite("looseness", &whiteout::models::wem::SoftJiggle::looseness, R"doc(The slowest swing's rate, swings a second.)doc")
+        .def_readwrite("bounce", &whiteout::models::wem::SoftJiggle::bounce, R"doc(0 is no overshoot.)doc")
+        .def_readwrite("weight", &whiteout::models::wem::SoftJiggle::weight, R"doc(Gravity's sag.)doc")
+        .def_readwrite("hold_shape", &whiteout::models::wem::SoftJiggle::holdShape, R"doc(How alike neighbouring points move.)doc")
+        .def_readwrite("keep_volume", &whiteout::models::wem::SoftJiggle::keepVolume, R"doc(How stiff the one direction that changes the volume is.)doc")
+        .def_readwrite("limit", &whiteout::models::wem::SoftJiggle::limit, R"doc(The farthest a lump may leave its goal, of the region's size.)doc")
+        .def_readwrite("keep_in_place", &whiteout::models::wem::SoftJiggle::keepInPlace, R"doc(Takes out the swing in which the whole body lags as one.)doc")
+        .def_readwrite("meets_floor", &whiteout::models::wem::SoftJiggle::meetsFloor)
+        .def_readwrite("world_forces", &whiteout::models::wem::SoftJiggle::worldForces, R"doc(The clip's winds and blasts push it.)doc")
+        .def_readwrite("kick_ids", &whiteout::models::wem::SoftJiggle::kickIds)
+        .def_readwrite("kick_mesh", &whiteout::models::wem::SoftJiggle::kickMesh)
+        .def_readwrite("kick_face", &whiteout::models::wem::SoftJiggle::kickFace)
+        .def_readwrite("kick_weights", &whiteout::models::wem::SoftJiggle::kickWeights)
+        .def_readwrite("kick_direction", &whiteout::models::wem::SoftJiggle::kickDirection, R"doc(Model space, unit; none is into the body at its place.)doc")
+        .def_readwrite("kick_strength", &whiteout::models::wem::SoftJiggle::kickStrength, R"doc(In g.)doc")
+    ;
+
+    py::class_<whiteout::models::wem::SoftWobble>(m, "SoftWobble", R"doc(§8.4. The Amount is how far, a share of the region's size.)doc")
+        .def(py::init<>())
+        .def_readwrite("pattern", &whiteout::models::wem::SoftWobble::pattern)
+        .def_readwrite("speed", &whiteout::models::wem::SoftWobble::speed, R"doc(Swings a second.)doc")
+        .def_readwrite("size", &whiteout::models::wem::SoftWobble::size, R"doc(Roll's wavelength, in regions.)doc")
+        .def_readwrite("overlap", &whiteout::models::wem::SoftWobble::overlap, R"doc(The far end trails the near end.)doc")
+        .def_readwrite("axis", &whiteout::models::wem::SoftWobble::axis)
+        .def_readwrite("axis_bone", &whiteout::models::wem::SoftWobble::axisBone)
+        .def_readwrite("keep_volume", &whiteout::models::wem::SoftWobble::keepVolume)
+    ;
+
+    py::class_<whiteout::models::wem::SoftBlobify>(m, "SoftBlobify", R"doc(§8.5. The Amount runs from the model (0) to its blob (1).)doc")
+        .def(py::init<>())
+        .def_readwrite("roundness", &whiteout::models::wem::SoftBlobify::roundness, R"doc(How far the balls reach.)doc")
+        .def_readwrite("swell", &whiteout::models::wem::SoftBlobify::swell, R"doc(A little more volume.)doc")
+        .def_readwrite("keep_volume", &whiteout::models::wem::SoftBlobify::keepVolume)
+    ;
+
+    py::class_<whiteout::models::wem::SoftDrip>(m, "SoftDrip", R"doc(§8.6.)doc")
+        .def(py::init<>())
+        .def_readwrite("preset", &whiteout::models::wem::SoftDrip::preset)
+        .def_readwrite("neck", &whiteout::models::wem::SoftDrip::neck)
+        .def_readwrite("sites_by_hand", &whiteout::models::wem::SoftDrip::sitesByHand)
+        .def_readwrite("sites", &whiteout::models::wem::SoftDrip::sites, R"doc(Auto: how many.)doc")
+        .def_readwrite("overhang", &whiteout::models::wem::SoftDrip::overhang, R"doc(Radians from straight down past which a face sheds: 60 degrees.)doc")
+        .def_readwrite("spacing", &whiteout::models::wem::SoftDrip::spacing, R"doc(Between sites, of the region's size.)doc")
+        .def_readwrite("to_ground", &whiteout::models::wem::SoftDrip::toGround)
+        .def_readwrite("length", &whiteout::models::wem::SoftDrip::length, R"doc(When not to the ground: of the region's size.)doc")
+        .def_readwrite("speed", &whiteout::models::wem::SoftDrip::speed, R"doc(Of the height a second.)doc")
+        .def_readwrite("thickness", &whiteout::models::wem::SoftDrip::thickness, R"doc(Of the region's size.)doc")
+        .def_readwrite("neck_width", &whiteout::models::wem::SoftDrip::neckWidth, R"doc(Of the thickness.)doc")
+        .def_readwrite("tip", &whiteout::models::wem::SoftDrip::tip, R"doc(Of the thickness.)doc")
+        .def_readwrite("stagger", &whiteout::models::wem::SoftDrip::stagger)
+        .def_readwrite("sway", &whiteout::models::wem::SoftDrip::sway, R"doc(How far a strand swings as it hangs: 0 is still, 1 twenty degrees.)doc")
+        .def_readwrite("pull", &whiteout::models::wem::SoftDrip::pull, R"doc(*Pull the surface*: how far the skin under a strand comes down with it.)doc")
+        .def_readwrite("pinch_every", &whiteout::models::wem::SoftDrip::pinchEvery, R"doc(Seconds between droplets; 0 is never.)doc")
+        .def_readwrite("material", &whiteout::models::wem::SoftDrip::material, R"doc(A material slot; none is the surface's.)doc")
+        .def_readwrite("site_mesh", &whiteout::models::wem::SoftDrip::siteMesh)
+        .def_readwrite("site_face", &whiteout::models::wem::SoftDrip::siteFace)
+        .def_readwrite("site_weights", &whiteout::models::wem::SoftDrip::siteWeights)
+        .def_readwrite("site_thickness", &whiteout::models::wem::SoftDrip::siteThickness, R"doc(Of the region's size; 0 is the setting's.)doc")
+        .def_readwrite("strand_nodes", &whiteout::models::wem::SoftDrip::strandNodes)
+        .def_readwrite("strand_at", &whiteout::models::wem::SoftDrip::strandAt)
+        .def_readwrite("strand_width", &whiteout::models::wem::SoftDrip::strandWidth)
+        .def_readwrite("drop_nodes", &whiteout::models::wem::SoftDrip::dropNodes, R"doc(The droplets as built, where the effect pinches off: one bone a strand, in the strands' order. Empty where it does not.)doc")
+    ;
+
+    py::class_<whiteout::models::wem::SoftSquash>(m, "SoftSquash", R"doc(§8.7. Keyed, the Amount runs from a squash (-1) to a stretch (+1).)doc")
+        .def(py::init<>())
+        .def_readwrite("mode", &whiteout::models::wem::SoftSquash::mode)
+        .def_readwrite("axis", &whiteout::models::wem::SoftSquash::axis)
+        .def_readwrite("axis_bone", &whiteout::models::wem::SoftSquash::axisBone)
+        .def_readwrite("stretch", &whiteout::models::wem::SoftSquash::stretch, R"doc(At speed.)doc")
+        .def_readwrite("squash", &whiteout::models::wem::SoftSquash::squash, R"doc(On a stop, a landing or a turn back.)doc")
+        .def_readwrite("turning", &whiteout::models::wem::SoftSquash::turning, R"doc(A swung part stretches away from the axis it turns about.)doc")
+        .def_readwrite("drag", &whiteout::models::wem::SoftSquash::drag, R"doc(The far parts trail the motion.)doc")
+        .def_readwrite("wind_up", &whiteout::models::wem::SoftSquash::windUp, R"doc(The body leans back before a move and carries past its end.)doc")
+        .def_readwrite("anchor", &whiteout::models::wem::SoftSquash::anchor)
+        .def_readwrite("smoothing", &whiteout::models::wem::SoftSquash::smoothing, R"doc(Seconds the speed is read over.)doc")
+    ;
+
+    py::class_<whiteout::models::wem::SoftMelt>(m, "SoftMelt", R"doc(§8.8. Its span is a progress: 0 at the start, 1 at the end.)doc")
+        .def(py::init<>())
+        .def_readwrite("order", &whiteout::models::wem::SoftMelt::order)
+        .def_readwrite("solidity", &whiteout::models::wem::SoftMelt::solidity, R"doc(Jelly 0, wax 0.5, ice 1: how long the middle stands.)doc")
+        .def_readwrite("on_grid", &whiteout::models::wem::SoftMelt::onGrid, R"doc(The floor is the grid; else `floor`.)doc")
+        .def_readwrite("floor", &whiteout::models::wem::SoftMelt::floor, R"doc(A height, model units.)doc")
+        .def_readwrite("puddle", &whiteout::models::wem::SoftMelt::puddle, R"doc(The widest it spreads, times the footprint.)doc")
+        .def_readwrite("uneven", &whiteout::models::wem::SoftMelt::uneven)
+        .def_readwrite("backward", &whiteout::models::wem::SoftMelt::backward, R"doc(The body rises out of its puddle.)doc")
+        .def_readwrite("stays_in_decay", &whiteout::models::wem::SoftMelt::staysInDecay, R"doc(The clips named Decay hold the end.)doc")
+    ;
+
+    py::class_<whiteout::models::wem::SoftRipple>(m, "SoftRipple", R"doc(§8.9. The Amount is the height, a share of the region's size.)doc")
+        .def(py::init<>())
+        .def_readwrite("along", &whiteout::models::wem::SoftRipple::along)
+        .def_readwrite("plays", &whiteout::models::wem::SoftRipple::plays)
+        .def_readwrite("from", &whiteout::models::wem::SoftRipple::from, R"doc(`Once`: spans, times or events.)doc")
+        .def_readwrite("event", &whiteout::models::wem::SoftRipple::event)
+        .def_readwrite("wavelength", &whiteout::models::wem::SoftRipple::wavelength, R"doc(Of the region's size.)doc")
+        .def_readwrite("speed", &whiteout::models::wem::SoftRipple::speed, R"doc(Regions a second.)doc")
+        .def_readwrite("through", &whiteout::models::wem::SoftRipple::through)
+        .def_readwrite("water", &whiteout::models::wem::SoftRipple::water, R"doc(The envelope moves at its own speed.)doc")
+        .def_readwrite("envelope", &whiteout::models::wem::SoftRipple::envelope, R"doc(... this many times the crests'.)doc")
+        .def_readwrite("fade_distance", &whiteout::models::wem::SoftRipple::fadeDistance)
+        .def_readwrite("fade_time", &whiteout::models::wem::SoftRipple::fadeTime, R"doc(Seconds.)doc")
+    ;
+
+    py::class_<whiteout::models::wem::SoftEffect>(m, "SoftEffect", R"doc(One effect of a soft body. Exactly the settings its kind names are set.)doc")
+        .def(py::init<>())
+        .def_readwrite("id", &whiteout::models::wem::SoftEffect::id, R"doc(Stable in its body, from 1: its `SoftAmount` channel's sub.)doc")
+        .def_readwrite("kind", &whiteout::models::wem::SoftEffect::kind)
+        .def_readwrite("name", &whiteout::models::wem::SoftEffect::name)
+        .def_readwrite("enabled", &whiteout::models::wem::SoftEffect::enabled)
+        .def_readwrite("amount", &whiteout::models::wem::SoftEffect::amount, R"doc(What a span at full is.)doc")
+        .def_readwrite("everywhere", &whiteout::models::wem::SoftEffect::everywhere, R"doc(`SoftAmount`'s rest: on where nothing keys it.)doc")
+        .def_readwrite("drives_jiggle", &whiteout::models::wem::SoftEffect::drivesJiggle, R"doc(§7. Off by default for Wobble and Ripple.)doc")
+        .def_readwrite("seed", &whiteout::models::wem::SoftEffect::seed)
+        .def_readwrite("place", &whiteout::models::wem::SoftEffect::place)
+        .def_readwrite("inflate", &whiteout::models::wem::SoftEffect::inflate)
+        .def_readwrite("bulge", &whiteout::models::wem::SoftEffect::bulge)
+        .def_readwrite("jiggle", &whiteout::models::wem::SoftEffect::jiggle)
+        .def_readwrite("wobble", &whiteout::models::wem::SoftEffect::wobble)
+        .def_readwrite("blobify", &whiteout::models::wem::SoftEffect::blobify)
+        .def_readwrite("drip", &whiteout::models::wem::SoftEffect::drip)
+        .def_readwrite("squash", &whiteout::models::wem::SoftEffect::squash)
+        .def_readwrite("melt", &whiteout::models::wem::SoftEffect::melt)
+        .def_readwrite("ripple", &whiteout::models::wem::SoftEffect::ripple)
+    ;
+
+    py::class_<whiteout::models::wem::SoftBody>(m, "SoftBody")
+        .def(py::init<>())
+        .def_readwrite("id", &whiteout::models::wem::SoftBody::id, R"doc(From `PhysicsSet::allocateId`: a channel names it.)doc")
+        .def_readwrite("name", &whiteout::models::wem::SoftBody::name, R"doc(Also the prefix of the bones an export makes.)doc")
+        .def_readwrite("meshes", &whiteout::models::wem::SoftBody::meshes, R"doc(The meshes that hold its points.)doc")
+        .def_readwrite("detail", &whiteout::models::wem::SoftBody::detail, R"doc(Surface lumps asked for, apart from those places claim (§6.2).)doc")
+        .def_readwrite("copy_all", &whiteout::models::wem::SoftBody::copyAll, R"doc(Copy every bone, shared or not (§6.2).)doc")
+        .def_readwrite("chains_as_they_are", &whiteout::models::wem::SoftBody::chainsAsTheyAre, R"doc(Bones with bones below them are used, and only turn (§6.2).)doc")
+        .def_readwrite("inside", &whiteout::models::wem::SoftBody::inside, R"doc(What the body keeps clear of (§5.4).)doc")
+        .def_readwrite("riders", &whiteout::models::wem::SoftBody::riders, R"doc(Parts in the region that ride rigidly (§5.4): each has a lump for every bone it rides, and its points are those lumps' whole.)doc")
+        .def_readwrite("blend", &whiteout::models::wem::SoftBody::blend, R"doc(Of the region's size (§5.2).)doc")
+        .def_readwrite("influences", &whiteout::models::wem::SoftBody::influences, R"doc(The weights a point the lanes were solved for (§6.4).)doc")
+        .def_readwrite("equal_shares", &whiteout::models::wem::SoftBody::equalShares, R"doc(Solved for classic groups.)doc")
+        .def_readwrite("lumps", &whiteout::models::wem::SoftBody::lumps)
+        .def_readwrite("effects", &whiteout::models::wem::SoftBody::effects, R"doc(In the order they run.)doc")
+        .def_readwrite("colliders", &whiteout::models::wem::SoftBody::colliders, R"doc(`ClothCollider::id`s.)doc")
+        .def_readwrite("drips", &whiteout::models::wem::SoftBody::drips, R"doc(The mesh Drip added, or none.)doc")
+        .def_readwrite("next_effect", &whiteout::models::wem::SoftBody::nextEffect, R"doc(The next effect id: never reused.)doc")
     ;
 
 }

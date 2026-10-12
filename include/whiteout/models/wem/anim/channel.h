@@ -170,6 +170,16 @@ enum class Channel : u8 {
     TeamColorTextureIndex,   ///< U32. Sub-texture 4, the team colour's.
     EnvironmentTextureIndex, ///< U32. Sub-texture 5, the reflection.
 
+    // The Workshop's soft bodies (EDIT_MODE_SOFTBODY_DESIGN.md §13), on a
+    // `Physics` target. The editor's own: a bake writes the lumps' tracks, an
+    // export makes bones of them (`ExpandSoftToBones`), and no writer keys
+    // any of the four.
+    SoftAmount, ///< F32, linear. An effect's level or progress in a clip: its spans. `sub` is `SoftSub(body, effect)`.
+    // A lump's departure from its family's bone, with `sub` `SoftSub(body, lump + 1)`.
+    SoftLumpTranslation, ///< F32x3. Along the model's axes at the bind.
+    SoftLumpRotation,    ///< Quat. About the lump's pivot.
+    SoftLumpScale,       ///< F32x3. About the lump's pivot, along the model's axes at the bind.
+
     Count
 };
 
@@ -209,6 +219,25 @@ constexpr u32 ClothOfDriverSub(u32 sub) {
 }
 constexpr u32 DriverOfSub(u32 sub) {
     return sub >> 16;
+}
+
+/// A soft body channel's `sub`: the body's id, and above it the effect's id
+/// (`SoftAmount`) or the lump's index + 1 (the lump channels), packed as
+/// `ClothDriverSub` packs.
+constexpr u32 SoftSub(u32 body, u32 index) {
+    return (body & 0xFFFFu) | (index << 16);
+}
+constexpr u32 SoftBodyOfSub(u32 sub) {
+    return sub & 0xFFFFu;
+}
+constexpr u32 SoftIndexOfSub(u32 sub) {
+    return sub >> 16;
+}
+
+/// One of the four soft body channels.
+constexpr bool IsSoftChannel(Channel channel) {
+    return channel == Channel::SoftAmount || channel == Channel::SoftLumpTranslation ||
+           channel == Channel::SoftLumpRotation || channel == Channel::SoftLumpScale;
 }
 
 const char* ToString(Channel channel);

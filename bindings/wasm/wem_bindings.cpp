@@ -43,6 +43,7 @@
 #include <whiteout/models/wem/nodes/tree.h>
 #include <whiteout/models/wem/anim/channel.h>
 #include <whiteout/models/wem/anim/clip.h>
+#include <whiteout/models/wem/physics/soft.h>
 #include <whiteout/models/wem/physics/physics.h>
 #include <whiteout/models/wem/physics/materials.h>
 #include <whiteout/models/wem/model.h>
@@ -738,6 +739,10 @@ EMSCRIPTEN_BINDINGS(wem) {
         .value("EmissiveTextureIndex", whiteout::models::wem::Channel::EmissiveTextureIndex)
         .value("TeamColorTextureIndex", whiteout::models::wem::Channel::TeamColorTextureIndex)
         .value("EnvironmentTextureIndex", whiteout::models::wem::Channel::EnvironmentTextureIndex)
+        .value("SoftAmount", whiteout::models::wem::Channel::SoftAmount)
+        .value("SoftLumpTranslation", whiteout::models::wem::Channel::SoftLumpTranslation)
+        .value("SoftLumpRotation", whiteout::models::wem::Channel::SoftLumpRotation)
+        .value("SoftLumpScale", whiteout::models::wem::Channel::SoftLumpScale)
         .value("Count", whiteout::models::wem::Channel::Count);
 
     enum_<whiteout::models::wem::Interpolation>("WemInterpolation")
@@ -796,6 +801,121 @@ EMSCRIPTEN_BINDINGS(wem) {
         .value("Grid", whiteout::models::wem::BakeFloor::Grid)
         .value("Off", whiteout::models::wem::BakeFloor::Off)
         .value("FollowsRoot", whiteout::models::wem::BakeFloor::FollowsRoot);
+
+    enum_<whiteout::models::wem::SoftEffectKind>("WemSoftEffectKind")
+        .value("Inflate", whiteout::models::wem::SoftEffectKind::Inflate)
+        .value("Bulge", whiteout::models::wem::SoftEffectKind::Bulge)
+        .value("Jiggle", whiteout::models::wem::SoftEffectKind::Jiggle)
+        .value("Wobble", whiteout::models::wem::SoftEffectKind::Wobble)
+        .value("Blobify", whiteout::models::wem::SoftEffectKind::Blobify)
+        .value("Drip", whiteout::models::wem::SoftEffectKind::Drip)
+        .value("SquashStretch", whiteout::models::wem::SoftEffectKind::SquashStretch)
+        .value("Melt", whiteout::models::wem::SoftEffectKind::Melt)
+        .value("Ripple", whiteout::models::wem::SoftEffectKind::Ripple)
+        .value("Count", whiteout::models::wem::SoftEffectKind::Count);
+
+    enum_<whiteout::models::wem::SoftLumpKind>("WemSoftLumpKind")
+        .value("Bone", whiteout::models::wem::SoftLumpKind::Bone)
+        .value("Copy", whiteout::models::wem::SoftLumpKind::Copy)
+        .value("Surface", whiteout::models::wem::SoftLumpKind::Surface)
+        .value("Count", whiteout::models::wem::SoftLumpKind::Count);
+
+    enum_<whiteout::models::wem::SoftAlong>("WemSoftAlong")
+        .value("Surface", whiteout::models::wem::SoftAlong::Surface)
+        .value("Bones", whiteout::models::wem::SoftAlong::Bones)
+        .value("Count", whiteout::models::wem::SoftAlong::Count);
+
+    enum_<whiteout::models::wem::SoftAxis>("WemSoftAxis")
+        .value("Auto", whiteout::models::wem::SoftAxis::Auto)
+        .value("Up", whiteout::models::wem::SoftAxis::Up)
+        .value("X", whiteout::models::wem::SoftAxis::X)
+        .value("Y", whiteout::models::wem::SoftAxis::Y)
+        .value("Z", whiteout::models::wem::SoftAxis::Z)
+        .value("Bone", whiteout::models::wem::SoftAxis::Bone)
+        .value("Motion", whiteout::models::wem::SoftAxis::Motion)
+        .value("Count", whiteout::models::wem::SoftAxis::Count);
+
+    enum_<whiteout::models::wem::SoftComesFrom>("WemSoftComesFrom")
+        .value("Spans", whiteout::models::wem::SoftComesFrom::Spans)
+        .value("Times", whiteout::models::wem::SoftComesFrom::Times)
+        .value("Events", whiteout::models::wem::SoftComesFrom::Events)
+        .value("Contact", whiteout::models::wem::SoftComesFrom::Contact)
+        .value("Count", whiteout::models::wem::SoftComesFrom::Count);
+
+    enum_<whiteout::models::wem::SoftPulse>("WemSoftPulse")
+        .value("None", whiteout::models::wem::SoftPulse::None)
+        .value("Breathe", whiteout::models::wem::SoftPulse::Breathe)
+        .value("Heartbeat", whiteout::models::wem::SoftPulse::Heartbeat)
+        .value("Rate", whiteout::models::wem::SoftPulse::Rate)
+        .value("Count", whiteout::models::wem::SoftPulse::Count);
+
+    enum_<whiteout::models::wem::SoftBulgeShape>("WemSoftBulgeShape")
+        .value("Round", whiteout::models::wem::SoftBulgeShape::Round)
+        .value("Ring", whiteout::models::wem::SoftBulgeShape::Ring)
+        .value("Count", whiteout::models::wem::SoftBulgeShape::Count);
+
+    enum_<whiteout::models::wem::SoftJigglePreset>("WemSoftJigglePreset")
+        .value("Custom", whiteout::models::wem::SoftJigglePreset::Custom)
+        .value("Jelly", whiteout::models::wem::SoftJigglePreset::Jelly)
+        .value("Fat", whiteout::models::wem::SoftJigglePreset::Fat)
+        .value("Muscle", whiteout::models::wem::SoftJigglePreset::Muscle)
+        .value("Rubber", whiteout::models::wem::SoftJigglePreset::Rubber)
+        .value("WaterBalloon", whiteout::models::wem::SoftJigglePreset::WaterBalloon)
+        .value("Water", whiteout::models::wem::SoftJigglePreset::Water)
+        .value("Slime", whiteout::models::wem::SoftJigglePreset::Slime)
+        .value("Count", whiteout::models::wem::SoftJigglePreset::Count);
+
+    enum_<whiteout::models::wem::SoftWobblePattern>("WemSoftWobblePattern")
+        .value("Jelly", whiteout::models::wem::SoftWobblePattern::Jelly)
+        .value("Sway", whiteout::models::wem::SoftWobblePattern::Sway)
+        .value("Roll", whiteout::models::wem::SoftWobblePattern::Roll)
+        .value("Random", whiteout::models::wem::SoftWobblePattern::Random)
+        .value("Count", whiteout::models::wem::SoftWobblePattern::Count);
+
+    enum_<whiteout::models::wem::SoftDripPreset>("WemSoftDripPreset")
+        .value("Custom", whiteout::models::wem::SoftDripPreset::Custom)
+        .value("Wax", whiteout::models::wem::SoftDripPreset::Wax)
+        .value("Slime", whiteout::models::wem::SoftDripPreset::Slime)
+        .value("Blood", whiteout::models::wem::SoftDripPreset::Blood)
+        .value("Paint", whiteout::models::wem::SoftDripPreset::Paint)
+        .value("Chocolate", whiteout::models::wem::SoftDripPreset::Chocolate)
+        .value("Honey", whiteout::models::wem::SoftDripPreset::Honey)
+        .value("Water", whiteout::models::wem::SoftDripPreset::Water)
+        .value("Count", whiteout::models::wem::SoftDripPreset::Count);
+
+    enum_<whiteout::models::wem::SoftNeckLaw>("WemSoftNeckLaw")
+        .value("Linear", whiteout::models::wem::SoftNeckLaw::Linear)
+        .value("Snap", whiteout::models::wem::SoftNeckLaw::Snap)
+        .value("Thread", whiteout::models::wem::SoftNeckLaw::Thread)
+        .value("Sets", whiteout::models::wem::SoftNeckLaw::Sets)
+        .value("Count", whiteout::models::wem::SoftNeckLaw::Count);
+
+    enum_<whiteout::models::wem::SoftSquashMode>("WemSoftSquashMode")
+        .value("Auto", whiteout::models::wem::SoftSquashMode::Auto)
+        .value("Keyed", whiteout::models::wem::SoftSquashMode::Keyed)
+        .value("Count", whiteout::models::wem::SoftSquashMode::Count);
+
+    enum_<whiteout::models::wem::SoftAnchor>("WemSoftAnchor")
+        .value("Bottom", whiteout::models::wem::SoftAnchor::Bottom)
+        .value("Centre", whiteout::models::wem::SoftAnchor::Centre)
+        .value("Pivot", whiteout::models::wem::SoftAnchor::Pivot)
+        .value("Count", whiteout::models::wem::SoftAnchor::Count);
+
+    enum_<whiteout::models::wem::SoftMeltOrder>("WemSoftMeltOrder")
+        .value("Top", whiteout::models::wem::SoftMeltOrder::Top)
+        .value("Bottom", whiteout::models::wem::SoftMeltOrder::Bottom)
+        .value("AllAtOnce", whiteout::models::wem::SoftMeltOrder::AllAtOnce)
+        .value("Count", whiteout::models::wem::SoftMeltOrder::Count);
+
+    enum_<whiteout::models::wem::SoftRipplePlays>("WemSoftRipplePlays")
+        .value("Once", whiteout::models::wem::SoftRipplePlays::Once)
+        .value("Loops", whiteout::models::wem::SoftRipplePlays::Loops)
+        .value("Count", whiteout::models::wem::SoftRipplePlays::Count);
+
+    enum_<whiteout::models::wem::SoftThrough>("WemSoftThrough")
+        .value("Skin", whiteout::models::wem::SoftThrough::Skin)
+        .value("Body", whiteout::models::wem::SoftThrough::Body)
+        .value("Count", whiteout::models::wem::SoftThrough::Count);
 
     enum_<whiteout::models::wem::PhysicsShapeKind>("WemPhysicsShapeKind")
         .value("Box", whiteout::models::wem::PhysicsShapeKind::Box)
@@ -1874,6 +1994,16 @@ EMSCRIPTEN_BINDINGS(wem) {
         .property("clothIds", &whiteout::models::wem::PhysicsBake::clothIds)
         .property("clothFits", &whiteout::models::wem::PhysicsBake::clothFits)
         .property("clothSizes", &whiteout::models::wem::PhysicsBake::clothSizes)
+        .property("softIds", &whiteout::models::wem::PhysicsBake::softIds)
+        .property("softLumps", &whiteout::models::wem::PhysicsBake::softLumps)
+        .property("softKeys", &whiteout::models::wem::PhysicsBake::softKeys)
+        .property("softWithin", &whiteout::models::wem::PhysicsBake::softWithin)
+        .property("softFollows", &whiteout::models::wem::PhysicsBake::softFollows)
+        .property("softPush", &whiteout::models::wem::PhysicsBake::softPush)
+        .property("softAtEnd", &whiteout::models::wem::PhysicsBake::softAtEnd)
+        .property("softChannels", &whiteout::models::wem::PhysicsBake::softChannels)
+        .property("softSource", &whiteout::models::wem::PhysicsBake::softSource)
+        .property("madeSettings", &whiteout::models::wem::PhysicsBake::madeSettings)
     ;
 
     class_<whiteout::models::wem::ClipPhysics>("WemClipPhysics")
@@ -1926,6 +2056,211 @@ EMSCRIPTEN_BINDINGS(wem) {
         .property("name", &whiteout::models::wem::AnimSet::name)
         .property("byTag", &whiteout::models::wem::AnimSet::byTag)
         .property("baseAnimSet", &whiteout::models::wem::AnimSet::baseAnimSet)
+    ;
+
+    class_<whiteout::models::wem::SoftPart>("WemSoftPart")
+        .constructor<>()
+        .property("mesh", &whiteout::models::wem::SoftPart::mesh)
+        .property("material", &whiteout::models::wem::SoftPart::material)
+    ;
+
+    class_<whiteout::models::wem::SoftPlace>("WemSoftPlace")
+        .constructor<>()
+        .property("mesh", &whiteout::models::wem::SoftPlace::mesh)
+        .property("face", &whiteout::models::wem::SoftPlace::face)
+        .property("weights", &whiteout::models::wem::SoftPlace::weights)
+        .property("radius", &whiteout::models::wem::SoftPlace::radius)
+    ;
+
+    class_<whiteout::models::wem::SoftLump>("WemSoftLump")
+        .constructor<>()
+        .property("kind", &whiteout::models::wem::SoftLump::kind)
+        .property("anchor", &whiteout::models::wem::SoftLump::anchor)
+        .property("rest", &whiteout::models::wem::SoftLump::rest)
+        .property("depth", &whiteout::models::wem::SoftLump::depth)
+        .property("clear", &whiteout::models::wem::SoftLump::clear)
+        .property("carrier", &whiteout::models::wem::SoftLump::carrier)
+        .property("node", &whiteout::models::wem::SoftLump::node)
+        .property("effect", &whiteout::models::wem::SoftLump::effect)
+        .property("rider", &whiteout::models::wem::SoftLump::rider)
+        .property("swings", &whiteout::models::wem::SoftLump::swings)
+        .property("rigid", &whiteout::models::wem::SoftLump::rigid)
+    ;
+
+    class_<whiteout::models::wem::SoftInflate>("WemSoftInflate")
+        .constructor<>()
+        .property("along", &whiteout::models::wem::SoftInflate::along)
+        .property("towardPlace", &whiteout::models::wem::SoftInflate::towardPlace)
+        .property("round", &whiteout::models::wem::SoftInflate::round)
+        .property("keepVolume", &whiteout::models::wem::SoftInflate::keepVolume)
+        .property("pulse", &whiteout::models::wem::SoftInflate::pulse)
+        .property("rate", &whiteout::models::wem::SoftInflate::rate)
+        .property("depth", &whiteout::models::wem::SoftInflate::depth)
+        .property("smooth", &whiteout::models::wem::SoftInflate::smooth)
+    ;
+
+    class_<whiteout::models::wem::SoftBulge>("WemSoftBulge")
+        .constructor<>()
+        .property("along", &whiteout::models::wem::SoftBulge::along)
+        .property("shape", &whiteout::models::wem::SoftBulge::shape)
+        .property("keepVolume", &whiteout::models::wem::SoftBulge::keepVolume)
+        .property("from", &whiteout::models::wem::SoftBulge::from)
+        .property("event", &whiteout::models::wem::SoftBulge::event)
+        .property("rise", &whiteout::models::wem::SoftBulge::rise)
+        .property("fall", &whiteout::models::wem::SoftBulge::fall)
+        .property("travels", &whiteout::models::wem::SoftBulge::travels)
+        .property("chain", &whiteout::models::wem::SoftBulge::chain)
+        .property("line", &whiteout::models::wem::SoftBulge::line)
+    ;
+
+    class_<whiteout::models::wem::SoftJiggle>("WemSoftJiggle")
+        .constructor<>()
+        .property("preset", &whiteout::models::wem::SoftJiggle::preset)
+        .property("looseness", &whiteout::models::wem::SoftJiggle::looseness)
+        .property("bounce", &whiteout::models::wem::SoftJiggle::bounce)
+        .property("weight", &whiteout::models::wem::SoftJiggle::weight)
+        .property("holdShape", &whiteout::models::wem::SoftJiggle::holdShape)
+        .property("keepVolume", &whiteout::models::wem::SoftJiggle::keepVolume)
+        .property("limit", &whiteout::models::wem::SoftJiggle::limit)
+        .property("keepInPlace", &whiteout::models::wem::SoftJiggle::keepInPlace)
+        .property("meetsFloor", &whiteout::models::wem::SoftJiggle::meetsFloor)
+        .property("worldForces", &whiteout::models::wem::SoftJiggle::worldForces)
+        .property("kickIds", &whiteout::models::wem::SoftJiggle::kickIds)
+        .property("kickMesh", &whiteout::models::wem::SoftJiggle::kickMesh)
+        .property("kickFace", &whiteout::models::wem::SoftJiggle::kickFace)
+        .property("kickWeights", &whiteout::models::wem::SoftJiggle::kickWeights)
+        .property("kickDirection", &whiteout::models::wem::SoftJiggle::kickDirection)
+        .property("kickStrength", &whiteout::models::wem::SoftJiggle::kickStrength)
+    ;
+
+    class_<whiteout::models::wem::SoftWobble>("WemSoftWobble")
+        .constructor<>()
+        .property("pattern", &whiteout::models::wem::SoftWobble::pattern)
+        .property("speed", &whiteout::models::wem::SoftWobble::speed)
+        .property("size", &whiteout::models::wem::SoftWobble::size)
+        .property("overlap", &whiteout::models::wem::SoftWobble::overlap)
+        .property("axis", &whiteout::models::wem::SoftWobble::axis)
+        .property("axisBone", &whiteout::models::wem::SoftWobble::axisBone)
+        .property("keepVolume", &whiteout::models::wem::SoftWobble::keepVolume)
+    ;
+
+    class_<whiteout::models::wem::SoftBlobify>("WemSoftBlobify")
+        .constructor<>()
+        .property("roundness", &whiteout::models::wem::SoftBlobify::roundness)
+        .property("swell", &whiteout::models::wem::SoftBlobify::swell)
+        .property("keepVolume", &whiteout::models::wem::SoftBlobify::keepVolume)
+    ;
+
+    class_<whiteout::models::wem::SoftDrip>("WemSoftDrip")
+        .constructor<>()
+        .property("preset", &whiteout::models::wem::SoftDrip::preset)
+        .property("neck", &whiteout::models::wem::SoftDrip::neck)
+        .property("sitesByHand", &whiteout::models::wem::SoftDrip::sitesByHand)
+        .property("sites", &whiteout::models::wem::SoftDrip::sites)
+        .property("overhang", &whiteout::models::wem::SoftDrip::overhang)
+        .property("spacing", &whiteout::models::wem::SoftDrip::spacing)
+        .property("toGround", &whiteout::models::wem::SoftDrip::toGround)
+        .property("length", &whiteout::models::wem::SoftDrip::length)
+        .property("speed", &whiteout::models::wem::SoftDrip::speed)
+        .property("thickness", &whiteout::models::wem::SoftDrip::thickness)
+        .property("neckWidth", &whiteout::models::wem::SoftDrip::neckWidth)
+        .property("tip", &whiteout::models::wem::SoftDrip::tip)
+        .property("stagger", &whiteout::models::wem::SoftDrip::stagger)
+        .property("sway", &whiteout::models::wem::SoftDrip::sway)
+        .property("pull", &whiteout::models::wem::SoftDrip::pull)
+        .property("pinchEvery", &whiteout::models::wem::SoftDrip::pinchEvery)
+        .property("material", &whiteout::models::wem::SoftDrip::material)
+        .property("siteMesh", &whiteout::models::wem::SoftDrip::siteMesh)
+        .property("siteFace", &whiteout::models::wem::SoftDrip::siteFace)
+        .property("siteWeights", &whiteout::models::wem::SoftDrip::siteWeights)
+        .property("siteThickness", &whiteout::models::wem::SoftDrip::siteThickness)
+        .property("strandNodes", &whiteout::models::wem::SoftDrip::strandNodes)
+        .property("strandAt", &whiteout::models::wem::SoftDrip::strandAt)
+        .property("strandWidth", &whiteout::models::wem::SoftDrip::strandWidth)
+        .property("dropNodes", &whiteout::models::wem::SoftDrip::dropNodes)
+    ;
+
+    class_<whiteout::models::wem::SoftSquash>("WemSoftSquash")
+        .constructor<>()
+        .property("mode", &whiteout::models::wem::SoftSquash::mode)
+        .property("axis", &whiteout::models::wem::SoftSquash::axis)
+        .property("axisBone", &whiteout::models::wem::SoftSquash::axisBone)
+        .property("stretch", &whiteout::models::wem::SoftSquash::stretch)
+        .property("squash", &whiteout::models::wem::SoftSquash::squash)
+        .property("turning", &whiteout::models::wem::SoftSquash::turning)
+        .property("drag", &whiteout::models::wem::SoftSquash::drag)
+        .property("windUp", &whiteout::models::wem::SoftSquash::windUp)
+        .property("anchor", &whiteout::models::wem::SoftSquash::anchor)
+        .property("smoothing", &whiteout::models::wem::SoftSquash::smoothing)
+    ;
+
+    class_<whiteout::models::wem::SoftMelt>("WemSoftMelt")
+        .constructor<>()
+        .property("order", &whiteout::models::wem::SoftMelt::order)
+        .property("solidity", &whiteout::models::wem::SoftMelt::solidity)
+        .property("onGrid", &whiteout::models::wem::SoftMelt::onGrid)
+        .property("floor", &whiteout::models::wem::SoftMelt::floor)
+        .property("puddle", &whiteout::models::wem::SoftMelt::puddle)
+        .property("uneven", &whiteout::models::wem::SoftMelt::uneven)
+        .property("backward", &whiteout::models::wem::SoftMelt::backward)
+        .property("staysInDecay", &whiteout::models::wem::SoftMelt::staysInDecay)
+    ;
+
+    class_<whiteout::models::wem::SoftRipple>("WemSoftRipple")
+        .constructor<>()
+        .property("along", &whiteout::models::wem::SoftRipple::along)
+        .property("plays", &whiteout::models::wem::SoftRipple::plays)
+        .property("from", &whiteout::models::wem::SoftRipple::from)
+        .property("event", &whiteout::models::wem::SoftRipple::event)
+        .property("wavelength", &whiteout::models::wem::SoftRipple::wavelength)
+        .property("speed", &whiteout::models::wem::SoftRipple::speed)
+        .property("through", &whiteout::models::wem::SoftRipple::through)
+        .property("water", &whiteout::models::wem::SoftRipple::water)
+        .property("envelope", &whiteout::models::wem::SoftRipple::envelope)
+        .property("fadeDistance", &whiteout::models::wem::SoftRipple::fadeDistance)
+        .property("fadeTime", &whiteout::models::wem::SoftRipple::fadeTime)
+    ;
+
+    class_<whiteout::models::wem::SoftEffect>("WemSoftEffect")
+        .constructor<>()
+        .property("id", &whiteout::models::wem::SoftEffect::id)
+        .property("kind", &whiteout::models::wem::SoftEffect::kind)
+        .property("name", &whiteout::models::wem::SoftEffect::name)
+        .property("enabled", &whiteout::models::wem::SoftEffect::enabled)
+        .property("amount", &whiteout::models::wem::SoftEffect::amount)
+        .property("everywhere", &whiteout::models::wem::SoftEffect::everywhere)
+        .property("drivesJiggle", &whiteout::models::wem::SoftEffect::drivesJiggle)
+        .property("seed", &whiteout::models::wem::SoftEffect::seed)
+        .property("place", &whiteout::models::wem::SoftEffect::place)
+        .property("inflate", &whiteout::models::wem::SoftEffect::inflate)
+        .property("bulge", &whiteout::models::wem::SoftEffect::bulge)
+        .property("jiggle", &whiteout::models::wem::SoftEffect::jiggle)
+        .property("wobble", &whiteout::models::wem::SoftEffect::wobble)
+        .property("blobify", &whiteout::models::wem::SoftEffect::blobify)
+        .property("drip", &whiteout::models::wem::SoftEffect::drip)
+        .property("squash", &whiteout::models::wem::SoftEffect::squash)
+        .property("melt", &whiteout::models::wem::SoftEffect::melt)
+        .property("ripple", &whiteout::models::wem::SoftEffect::ripple)
+    ;
+
+    class_<whiteout::models::wem::SoftBody>("WemSoftBody")
+        .constructor<>()
+        .property("id", &whiteout::models::wem::SoftBody::id)
+        .property("name", &whiteout::models::wem::SoftBody::name)
+        .property("meshes", &whiteout::models::wem::SoftBody::meshes)
+        .property("detail", &whiteout::models::wem::SoftBody::detail)
+        .property("copyAll", &whiteout::models::wem::SoftBody::copyAll)
+        .property("chainsAsTheyAre", &whiteout::models::wem::SoftBody::chainsAsTheyAre)
+        .property("inside", &whiteout::models::wem::SoftBody::inside)
+        .property("riders", &whiteout::models::wem::SoftBody::riders)
+        .property("blend", &whiteout::models::wem::SoftBody::blend)
+        .property("influences", &whiteout::models::wem::SoftBody::influences)
+        .property("equalShares", &whiteout::models::wem::SoftBody::equalShares)
+        .property("lumps", &whiteout::models::wem::SoftBody::lumps)
+        .property("effects", &whiteout::models::wem::SoftBody::effects)
+        .property("colliders", &whiteout::models::wem::SoftBody::colliders)
+        .property("drips", &whiteout::models::wem::SoftBody::drips)
+        .property("nextEffect", &whiteout::models::wem::SoftBody::nextEffect)
     ;
 
     class_<whiteout::models::wem::PhysicsMaterial>("WemPhysicsMaterial")
@@ -2202,6 +2537,7 @@ EMSCRIPTEN_BINDINGS(wem) {
         .property("colliders", &whiteout::models::wem::PhysicsSet::colliders)
         .property("cloths", &whiteout::models::wem::PhysicsSet::cloths)
         .property("rigs", &whiteout::models::wem::PhysicsSet::rigs)
+        .property("soft", &whiteout::models::wem::PhysicsSet::soft)
         .property("nextId", &whiteout::models::wem::PhysicsSet::nextId)
     ;
 
@@ -2415,6 +2751,10 @@ EMSCRIPTEN_BINDINGS(wem) {
     register_vector<whiteout::models::wem::Sc2Property<whiteout::Vector3f>>("VectorWemSc2PropertyVector3f");
     register_vector<whiteout::models::wem::Sc2RibbonSplinePoint>("VectorWemSc2RibbonSplinePoint");
     register_vector<whiteout::models::wem::SlotBinding>("VectorWemSlotBinding");
+    register_vector<whiteout::models::wem::SoftBody>("VectorWemSoftBody");
+    register_vector<whiteout::models::wem::SoftEffect>("VectorWemSoftEffect");
+    register_vector<whiteout::models::wem::SoftLump>("VectorWemSoftLump");
+    register_vector<whiteout::models::wem::SoftPart>("VectorWemSoftPart");
     register_vector<whiteout::models::wem::SubTrack>("VectorWemSubTrack");
     register_vector<whiteout::models::wem::SubTrackContainer>("VectorWemSubTrackContainer");
     register_vector<whiteout::models::wem::TextureRef>("VectorWemTextureRef");

@@ -54,6 +54,14 @@ void RemapMeshReferencers(Model& model, std::span<const u32> meshRemap, Diagnost
         InvalidatePhysicsChannels(model.animChannels, clothsGone, out);
         DetachPoseStages(model.poseStages, clothsGone);
     }
+    // A soft body left with no mesh goes, and its channels with it.
+    const std::vector<u32> softGone = RemapSoftMeshes(model.physics, meshRemap);
+    if (!softGone.empty()) {
+        out.warn(DiagCode::PhysicsReferenceInvalid,
+                 number(static_cast<u32>(softGone.size())) + " soft bodies lost their meshes",
+                 ElementRef());
+        InvalidatePhysicsChannels(model.animChannels, softGone, out);
+    }
     for (AnimChannel& channel : model.animChannels.channels) {
         if (channel.target.kind != TrackTarget::Kind::Section ||
             channel.target.mesh == kInvalidIndex) {
@@ -275,6 +283,12 @@ std::optional<MergedMesh> MergedMeshOf(const Model& model, std::span<const u32> 
             return refuse("mesh " + number(m) + " has " + number(mesh.sections.size()) +
                           " sections");
         }
+        // A Drip's strands are a mesh its effect builds again and takes away.
+        for (const SoftBody& body : model.physics.soft) {
+            if (body.drips == m) {
+                return refuse("mesh " + number(m) + " is the strands of soft body '" + body.name + "'");
+            }
+        }
     }
 
     // Copies, primary first and the rest in index order: that is the order the
@@ -422,6 +436,28 @@ MeshMergeResult MergeMeshesInto(Model& model, std::span<const u32> meshes, u32 k
                                 ElementRef(ElementKind::Mesh, keep));
         InvalidatePhysicsChannels(model.animChannels, clothsGone, result.diagnostics);
         DetachPoseStages(model.poseStages, clothsGone);
+    }
+
+    // A soft body's points went into the kept mesh with their layers, the
+    // faces of each absorbed mesh after those before it: it follows them.
+    {
+        std::vector<u8> merged(count, 0);
+        std::vector<u32> faceBase(count, 0);
+        u32 faces = static_cast<u32>(model.meshes[keep].faceCount());
+        merged[keep] = 1;
+        for (const u32 m : picked) {
+            if (m != keep) {
+                merged[m] = 1;
+                faceBase[m] = faces;
+                faces += static_cast<u32>(model.meshes[m].faceCount());
+            }
+        }
+        if (const u32 letGo = SoftFollowMergedMeshes(model.physics, merged, keep, faceBase); letGo != 0) {
+            result.diagnostics.warn(DiagCode::PhysicsReferenceInvalid,
+                                    number(letGo) + " parts no longer ride a soft body rigidly: their mesh "
+                                                    "was merged with another",
+                                    ElementRef(ElementKind::Mesh, keep));
+        }
     }
 
     model.meshes[keep] = std::move(built.mesh);

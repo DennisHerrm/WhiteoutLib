@@ -384,11 +384,6 @@ std::vector<u32> ClothDrawnVertices(const Model& model, const Cloth& cloth) {
     return {drawn.begin(), drawn.end()};
 }
 
-namespace {
-
-/// A bone named @p name under @p parent, standing at model-space @p rest:
-/// its pivot on a pivot rig, its local and every pose entry on an explicit
-/// one. Returns its index.
 u32 AddBoneAt(NodeTree& tree, std::string name, u32 parent, const Matrix44f& rest) {
     Node node;
     node.name = std::move(name);
@@ -418,8 +413,6 @@ u32 AddBoneAt(NodeTree& tree, std::string name, u32 parent, const Matrix44f& res
     }
     return tree.add(std::move(node));
 }
-
-} // namespace
 
 u32 ExpandClothToBones(Document& document, ProfileId target, Diagnostics& out) {
     const ProfileDesc& profile = Profile(target);

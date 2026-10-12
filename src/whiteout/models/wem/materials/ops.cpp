@@ -3,6 +3,8 @@
 
 #include <whiteout/models/wem/materials/ops.h>
 
+#include <whiteout/models/wem/physics/references.h>
+
 #include <algorithm>
 #include <cstring>
 #include <iterator>
@@ -463,6 +465,15 @@ RemovalResult RemoveSlot(Model& model, u32 slot, u32 replacement) {
         }
         return index == slot ? kInvalidIndex : index - 1;
     };
+
+    // A soft body's parts follow, while the sections still say which faces
+    // drew with the slot.
+    if (const u32 letGo = RemapSoftSlots(model, slot, replacement); letGo != 0) {
+        result.diagnostics.warn(DiagCode::PhysicsReferenceInvalid,
+                                number(letGo) + " parts no longer ride a soft body rigidly: the slot that took "
+                                                "their faces already drew others of their mesh",
+                                ElementRef(ElementKind::Slot, slot));
+    }
 
     // --- the users take the replacement ----------------------------------------
     for (Mesh& mesh : model.meshes) {

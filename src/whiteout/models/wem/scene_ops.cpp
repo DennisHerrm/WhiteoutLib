@@ -7,6 +7,7 @@
 #include <whiteout/models/wem/anim/track_read.h>
 #include <whiteout/models/wem/materials/ops.h>
 #include <whiteout/models/wem/nodes/remove.h>
+#include <whiteout/models/wem/physics/references.h>
 
 #include <algorithm>
 #include <array>
@@ -776,6 +777,9 @@ MergeResult MergeModel(Document& into, u32 model, Document donor, u32 from, cons
                                     "the merged model's physics and pose stages stay behind");
         }
         kept.physics = PhysicsSet{};
+        for (Mesh& mesh : kept.meshes) {
+            DropSoftLayers(mesh);
+        }
         kept.poseStages.clear();
         kept.testPoses.clear();
         kept.tPose = kInvalidIndex;

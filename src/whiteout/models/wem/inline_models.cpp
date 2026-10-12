@@ -5,6 +5,7 @@
 
 #include <whiteout/models/wem/anim/track_read.h>
 #include <whiteout/models/wem/nodes/remove.h>
+#include <whiteout/models/wem/physics/references.h>
 
 #include <array>
 #include <cmath>
@@ -290,6 +291,8 @@ void Place(Document& document, u32 into, u32 attachment, u32 from, Adopted& adop
 
     for (Mesh& mesh : meshes) {
         mesh.name = Behind(prefix, mesh.name);
+        // Its model's soft bodies stay behind with the rest of its physics.
+        DropSoftLayers(mesh);
         for (Vector3f& p : mesh.attributes.get<Vector3f>(geom::names::kPosition, geom::Domain::Vertex)) {
             p = placement.point(p);
         }

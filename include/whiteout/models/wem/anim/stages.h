@@ -121,13 +121,23 @@ private:
         std::vector<Matrix44f> offsets;
     };
 
-    void constrainOne(const Animator& animator, const Mix* mix, Pose& pose, const PoseStage& stage) const;
-    /// The constraint and IK stages that run before @p stage.
-    void constrainBefore(const Animator& animator, const Mix* mix, Pose& pose, const PoseStage& stage) const;
+    /// What one pass over the stages has worked out of its Links.
+    struct LinkPass;
+    /// A Link's carriers and their shares in a pose.
+    struct LinkReading {
+        std::vector<Matrix44f> carriers;
+        std::vector<f32> shares;
+    };
+
+    void constrainOne(const Animator& animator, const Mix& mix, Pose& pose, const PoseStage& stage,
+                      LinkPass& pass) const;
+    /// @p stage, a Link, read in the pose the constraint and IK stages before
+    /// it leave at @p mix; at rest where it is null.
+    LinkReading linkReading(const Animator& animator, const Mix* mix, const PoseStage& stage, LinkPass& pass) const;
     /// Where @p mix's switches have left a Link: every key of its sources'
     /// Enabled replayed from the clip's start, the offsets rebased wherever the
     /// shares change, so the node keeps its place.
-    LinkCarry linkCarry(const Animator& animator, const Mix* mix, const PoseStage& stage) const;
+    LinkCarry linkCarry(const Animator& animator, const Mix& mix, const PoseStage& stage, LinkPass& pass) const;
     void step(const Animator& animator, const Mix& mix, f32 at, f32 loop, const StageHooks* hooks);
     void simulate(const Animator& animator, Pose& pose, const PoseStage& stage, f32 dt, const StageHooks* hooks);
 

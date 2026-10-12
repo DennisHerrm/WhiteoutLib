@@ -490,6 +490,7 @@ add_library(whiteout_lib
     src/whiteout/models/wem/skinning/generate.cpp
     src/whiteout/models/wem/skinning/generate_heat.cpp
     src/whiteout/models/wem/skinning/generate_geodesic.cpp
+    src/whiteout/models/wem/skinning/solid.cpp
     src/whiteout/models/wem/skinning/transfer.cpp
     src/whiteout/models/wem/rigging/record.cpp
     src/whiteout/models/wem/rigging/ik.cpp
@@ -558,6 +559,19 @@ add_library(whiteout_lib
     src/whiteout/models/wem/physics/bake.cpp
     src/whiteout/models/wem/physics/cloth_bake.cpp
     src/whiteout/models/wem/physics/cloth_cage.cpp
+    src/whiteout/models/wem/physics/soft.cpp
+    src/whiteout/models/wem/physics/soft_region.cpp
+    src/whiteout/models/wem/physics/soft_lumps.cpp
+    src/whiteout/models/wem/physics/soft_run.cpp
+    src/whiteout/models/wem/physics/soft_fit.cpp
+    src/whiteout/models/wem/physics/soft_fields.cpp
+    src/whiteout/models/wem/physics/soft_step.cpp
+    src/whiteout/models/wem/physics/soft_bake.cpp
+    src/whiteout/models/wem/physics/soft_pass.cpp
+    src/whiteout/models/wem/physics/soft_modes.cpp
+    src/whiteout/models/wem/physics/soft_shapes.cpp
+    src/whiteout/models/wem/physics/soft_drip.cpp
+    src/whiteout/models/wem/physics/soft_contact.cpp
     src/whiteout/models/wem/converters/m3_track_sink.cpp
     src/whiteout/models/cross/mdx_m3_effects.cpp
     src/whiteout/models/cross/wc3_sc2_emitters.cpp

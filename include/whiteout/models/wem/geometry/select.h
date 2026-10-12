@@ -16,6 +16,7 @@
  * it, as every member of a point is. All of them need the mesh's connectivity.
  */
 
+#include <span>
 #include <vector>
 
 #include <whiteout/common_types.h>
@@ -121,6 +122,11 @@ ElementSet LinkedByAngle(const Mesh& mesh, const PointTable& points, const Eleme
 /// Select Sharp (§3.17): every edge whose two faces meet at more than @p angle
 /// radians — what Hard takes as its input.
 ElementSet SharpEdges(const Mesh& mesh, f32 angle);
+
+/// By material (EDIT_MODE_SOFTBODY_DESIGN.md §5.1): every face whose section
+/// draws with one of @p slots (`MeshSection::materialSlot`). Reads the face
+/// sections alone, so it needs no connectivity.
+ElementSet FacesOfMaterials(const Mesh& mesh, std::span<const u32> slots);
 
 /// The selection at level @p from, as elements of level @p to (§4.3):
 /// - to Vertex: every vertex of the elements;

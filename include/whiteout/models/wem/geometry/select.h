@@ -79,17 +79,37 @@ enum class ConvertRule : u8 {
     Enclosed, ///< Only those all of whose vertices are selected.
 };
 
+/// The quads a triangulated mesh was cut from, as the three walkers below
+/// take them: per edge, 1 on the diagonal of each pair of triangles To Quads
+/// (`PlanJoinTriangles`, at its own limits and by its own ranking) would join
+/// over the whole mesh. Nothing is written. Empty for a mesh with no
+/// triangle, or without connectivity. Defined beside To Quads, in
+/// `modelling.cpp`.
+std::vector<u8> JoinDiagonals(const Mesh& mesh);
+
 /// The edge loop through @p edge: straight on through every point of four
 /// edges (R§3.1), stopping at a pole or a border. A border edge walks its
 /// border loop, as 3ds Max and Blender do.
-ElementSet EdgeLoop(const Mesh& mesh, const PointTable& points, EdgeId edge);
+///
+/// @p diagonals, here and in the two below, is `JoinDiagonals`'s mask or
+/// empty: an edge it marks is stepped over, and the two triangles beside it
+/// are walked as the quad they make, so a triangulated mesh has the loops it
+/// would have after To Quads. A marked edge has no ring.
+///
+/// With a mask the loop also passes a point the quads do not carry it through
+/// when a triangle is there: straight on over the surface, where one edge
+/// clearly continues the line and the line read back from it is the same. A
+/// game's mesh pairs into quads only in part, and its loops would stop every
+/// few edges otherwise.
+ElementSet EdgeLoop(const Mesh& mesh, const PointTable& points, EdgeId edge, std::span<const u8> diagonals = {});
 
 /// The edge ring through @p edge: across each quad beside it to the opposite
 /// edge, both ways, stopping at a face that is not a quad.
-ElementSet EdgeRing(const Mesh& mesh, const PointTable& points, EdgeId edge);
+ElementSet EdgeRing(const Mesh& mesh, const PointTable& points, EdgeId edge, std::span<const u8> diagonals = {});
 
-/// The quads `EdgeRing` crosses from @p edge: a face loop.
-ElementSet FaceLoop(const Mesh& mesh, const PointTable& points, EdgeId edge);
+/// The quads `EdgeRing` crosses from @p edge: a face loop. A quad two
+/// triangles make is both of them.
+ElementSet FaceLoop(const Mesh& mesh, const PointTable& points, EdgeId edge, std::span<const u8> diagonals = {});
 
 /// Every edge of the border loop @p edge lies on; empty for an interior edge.
 ElementSet BorderLoop(const Mesh& mesh, const PointTable& points, EdgeId edge);

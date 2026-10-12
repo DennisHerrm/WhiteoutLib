@@ -4,6 +4,8 @@
 #include <whiteout/models/wem/geometry/select.h>
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <deque>
 #include <unordered_map>
 #include <unordered_set>
@@ -26,12 +28,41 @@ u64 pairKey(u32 a, u32 b) {
     return (static_cast<u64>(std::min(a, b)) << 32) | std::max(a, b);
 }
 
+// Straight on over triangles (`Walk::straightOn`), in radians: how far the
+// line may turn at a point, how much less it must turn than the next edge, and
+// how much further off an edge marked a diagonal counts.
+constexpr f32 kStraightLimit = 0.610865f; // 35 degrees
+constexpr f32 kStraightApart = 0.174533f; // 10 degrees
+constexpr f32 kDiagonalTurn = 0.174533f;  // 10 degrees
+
+f32 dot3(const Vector3f& a, const Vector3f& b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+/// @p v laid into the plane square to @p normal, at unit length; false when it
+/// has no length there.
+bool flatten(const Vector3f& v, const Vector3f& normal, Vector3f& out) {
+    const f32 nn = dot3(normal, normal);
+    out = nn > 0.0f ? v - normal * (dot3(v, normal) / nn) : v;
+    const f32 length = std::sqrt(dot3(out, out));
+    if (!(length > 0.0f)) {
+        return false;
+    }
+    out = out / length;
+    return true;
+}
+
 /// The mesh seen as points: each vertex's point, each point's members, and the
 /// edges realising each pair of points. A table that does not cover the mesh
 /// (stale, or never built) makes every vertex its own point.
+///
+/// With @p diagonals (`JoinDiagonals`), the faces are seen as the quads those
+/// edges cut: `next`, `prev`, `neighbours` and `turns` step over a marked edge.
 class Walk {
 public:
-    Walk(const Mesh& mesh, const PointTable& points) : mesh_(mesh), topology_(mesh.topology()) {
+    Walk(const Mesh& mesh, const PointTable& points, std::span<const u8> diagonals = {})
+        : mesh_(mesh), topology_(mesh.topology()), diagonals_(diagonals),
+          positions_(mesh.attributes.get<const Vector3f>(names::kPosition, Domain::Vertex)) {
         const u32 vertexCount = topology_.vertexCount();
         const bool covers = points.pointOf.size() == vertexCount;
         pointOf_.resize(vertexCount);
@@ -72,6 +103,43 @@ public:
         return pairKey(point(topology_.from(h).value()), point(topology_.to(h).value()));
     }
 
+    /// A diagonal the walk steps over: marked, with a face on both sides.
+    bool hidden(HalfedgeId h) const {
+        const u32 e = Topology::edge(h).value();
+        return e < diagonals_.size() && diagonals_[e] != 0 && topology_.face(h).valid() &&
+               topology_.face(Topology::opposite(h)).valid();
+    }
+
+    /// The halfedge after @p h round its face, over a diagonal into the
+    /// triangle beyond it; `prev` the one before. A triangle has one diagonal
+    /// at most, and the count holds a mask that says otherwise to a few steps.
+    HalfedgeId next(HalfedgeId h) const {
+        HalfedgeId n = topology_.next(h);
+        for (u32 i = 0; i < 4 && hidden(n); ++i) {
+            n = topology_.next(Topology::opposite(n));
+        }
+        return n;
+    }
+
+    HalfedgeId prev(HalfedgeId h) const {
+        HalfedgeId p = topology_.prev(h);
+        for (u32 i = 0; i < 4 && hidden(p); ++i) {
+            p = topology_.prev(Topology::opposite(p));
+        }
+        return p;
+    }
+
+    /// The four sides of the quad on @p h's side, from @p h round; false when
+    /// the face there, diagonals stepped over, is not one.
+    bool quad(HalfedgeId h, std::array<HalfedgeId, 4>& sides) const {
+        HalfedgeId at = h;
+        for (HalfedgeId& side : sides) {
+            side = at;
+            at = next(at);
+        }
+        return at == h && sides[1] != h && sides[2] != h && sides[3] != h;
+    }
+
     /// Every edge realising the pair @p key (point ids).
     const std::vector<u32>& edgesOf(u64 key) const {
         static const std::vector<u32> none;
@@ -79,8 +147,9 @@ public:
         return found == pairEdges_.end() ? none : found->second;
     }
 
-    /// The points one edge away from @p point, sorted.
-    std::vector<u32> neighbours(u32 point) const {
+    /// The points one edge away from @p point, sorted; @p cuts, across a
+    /// diagonal too.
+    std::vector<u32> neighbours(u32 point, bool cuts = false) const {
         std::vector<u32> out;
         for (const u32 m : members(point)) {
             if (!topology_.outgoing(VertexId(m)).valid()) {
@@ -88,7 +157,7 @@ public:
             }
             for (const HalfedgeId h : topology_.voh(VertexId(m))) {
                 const u32 q = this->point(topology_.to(h).value());
-                if (q != point) {
+                if (q != point && (cuts || !hidden(h))) {
                     out.push_back(q);
                 }
             }
@@ -148,14 +217,80 @@ public:
                 continue;
             }
             for (const HalfedgeId h : topology_.voh(VertexId(m))) {
-                if (!topology_.face(h).valid()) {
+                if (!topology_.face(h).valid() || hidden(h)) {
                     continue;
                 }
-                out.push_back({this->point(topology_.to(h).value()),
-                               this->point(topology_.from(topology_.prev(h)).value())});
+                out.push_back({this->point(topology_.to(h).value()), this->point(topology_.from(prev(h)).value())});
             }
         }
         return out;
+    }
+
+    /// Whether the walk was handed diagonals, and so passes triangles.
+    bool overTriangles() const {
+        return !diagonals_.empty();
+    }
+
+    /// Whether a triangle has a corner at @p point.
+    bool atTriangle(u32 point) const {
+        for (const u32 f : faces(point)) {
+            if (topology_.valence(FaceId(f)) == 3) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Straight on through @p current, arriving from @p previous, where the
+    /// faces there are not four quads: the neighbour whose edge turns least
+    /// once both are laid into the point's tangent plane, which is where a
+    /// line round a limb is straight. kInvalidId when none is within
+    /// kStraightLimit, or the next is within kStraightApart of it.
+    u32 straightOn(u32 previous, u32 current) const {
+        if (members(previous).empty() || members(current).empty() || positions_.size() < topology_.vertexCount()) {
+            return kInvalidId;
+        }
+        const Vector3f at = place(current);
+        // The faces' area normals, summed: Newell's, so a polygon counts whole.
+        Vector3f normal{0.0f, 0.0f, 0.0f};
+        for (const u32 f : faces(current)) {
+            const std::vector<u32> ring = faceVertices(f);
+            for (std::size_t i = 0; i < ring.size(); ++i) {
+                const Vector3f& a = positions_[ring[i]];
+                const Vector3f& b = positions_[ring[(i + 1) % ring.size()]];
+                normal.x += (a.y - b.y) * (a.z + b.z);
+                normal.y += (a.z - b.z) * (a.x + b.x);
+                normal.z += (a.x - b.x) * (a.y + b.y);
+            }
+        }
+        Vector3f in;
+        if (!flatten(at - place(previous), normal, in)) {
+            return kInvalidId;
+        }
+        f32 best = 8.0f;
+        f32 second = 8.0f;
+        u32 chosen = kInvalidId;
+        for (const u32 q : neighbours(current, true)) {
+            Vector3f out;
+            if (q == previous || !flatten(place(q) - at, normal, out)) {
+                continue;
+            }
+            f32 turn = std::acos(std::clamp(dot3(out, in), -1.0f, 1.0f));
+            // A line of the quads before the cut beside it.
+            const std::vector<u32>& edges = edgesOf(pairKey(current, q));
+            if (std::all_of(edges.begin(), edges.end(),
+                            [&](u32 e) { return hidden(Topology::halfedge(EdgeId(e), 0)); })) {
+                turn += kDiagonalTurn;
+            }
+            if (turn < best) {
+                second = best;
+                best = turn;
+                chosen = q;
+            } else if (turn < second) {
+                second = turn;
+            }
+        }
+        return best <= kStraightLimit && second - best >= kStraightApart ? chosen : kInvalidId;
     }
 
     std::vector<u32> faceVertices(u32 face) const {
@@ -221,8 +356,15 @@ public:
     }
 
 private:
+    /// Where @p point is: its first member's position.
+    const Vector3f& place(u32 point) const {
+        return positions_[members(point).front()];
+    }
+
     const Mesh& mesh_;
     const Topology& topology_;
+    std::span<const u8> diagonals_;
+    std::span<const Vector3f> positions_;
     std::vector<u32> pointOf_;
     std::vector<std::vector<u32>> members_;
     std::unordered_map<u64, std::vector<u32>> pairEdges_; // looked up, never iterated
@@ -373,7 +515,7 @@ ElementSet BorderLoop(const Mesh& mesh, const PointTable& points, EdgeId edge) {
     return out;
 }
 
-ElementSet EdgeLoop(const Mesh& mesh, const PointTable& points, EdgeId edge) {
+ElementSet EdgeLoop(const Mesh& mesh, const PointTable& points, EdgeId edge, std::span<const u8> diagonals) {
     ElementSet out;
     if (!mesh.hasConnectivity()) {
         return out;
@@ -382,7 +524,7 @@ ElementSet EdgeLoop(const Mesh& mesh, const PointTable& points, EdgeId edge) {
     if (edge.index() >= topology.edgeCount() || topology.isDeleted(edge)) {
         return out;
     }
-    const Walk walk(mesh, points);
+    const Walk walk(mesh, points, diagonals);
     if (walk.realBorder(edge.value())) {
         return BorderLoop(mesh, points, edge);
     }
@@ -397,30 +539,40 @@ ElementSet EdgeLoop(const Mesh& mesh, const PointTable& points, EdgeId edge) {
         u32 previous = from;
         u32 current = to;
         while (!walk.onBorder(current)) {
-            const std::vector<u32> around = walk.neighbours(current);
-            if (around.size() != 4) {
-                break;
-            }
             // Straight on: the one neighbour no face at `current` turns
             // through together with `previous`.
-            std::vector<u32> beside{previous};
-            for (const auto& [x, y] : walk.turns(current)) {
-                if (x == previous) {
-                    beside.push_back(y);
-                } else if (y == previous) {
-                    beside.push_back(x);
-                }
-            }
-            sortUnique(beside);
             u32 next = kInvalidId;
-            u32 candidates = 0;
-            for (const u32 q : around) {
-                if (!contains(beside, q)) {
-                    next = q;
-                    ++candidates;
+            const std::vector<u32> around = walk.neighbours(current);
+            if (around.size() == 4) {
+                std::vector<u32> beside{previous};
+                for (const auto& [x, y] : walk.turns(current)) {
+                    if (x == previous) {
+                        beside.push_back(y);
+                    } else if (y == previous) {
+                        beside.push_back(x);
+                    }
+                }
+                sortUnique(beside);
+                u32 candidates = 0;
+                for (const u32 q : around) {
+                    if (!contains(beside, q)) {
+                        next = q;
+                        ++candidates;
+                    }
+                }
+                if (candidates != 1) {
+                    next = kInvalidId;
                 }
             }
-            if (candidates != 1 || !visited.insert(pairKey(current, next)).second) {
+            // Where triangles break the quads: straight on over the surface,
+            // when the line read back from there is this one.
+            if (next == kInvalidId && walk.overTriangles() && walk.atTriangle(current)) {
+                next = walk.straightOn(previous, current);
+                if (next != kInvalidId && walk.straightOn(next, current) != previous) {
+                    next = kInvalidId;
+                }
+            }
+            if (next == kInvalidId || !visited.insert(pairKey(current, next)).second) {
                 break;
             }
             for (const u32 e : walk.edgesOf(pairKey(current, next))) {
@@ -437,8 +589,8 @@ ElementSet EdgeLoop(const Mesh& mesh, const PointTable& points, EdgeId edge) {
 namespace {
 
 /// Across quads from @p edge's pair, both ways: the pairs reached and the quads
-/// crossed.
-ElementSet ringOf(const Mesh& mesh, const PointTable& points, EdgeId edge) {
+/// crossed, a quad two triangles make as both.
+ElementSet ringOf(const Mesh& mesh, const PointTable& points, EdgeId edge, std::span<const u8> diagonals) {
     ElementSet out;
     if (!mesh.hasConnectivity()) {
         return out;
@@ -447,7 +599,7 @@ ElementSet ringOf(const Mesh& mesh, const PointTable& points, EdgeId edge) {
     if (edge.index() >= topology.edgeCount() || topology.isDeleted(edge)) {
         return out;
     }
-    const Walk walk(mesh, points);
+    const Walk walk(mesh, points, diagonals);
     const u64 start = walk.key(Topology::halfedge(edge, 0));
     std::unordered_set<u64> visited{start};
     std::unordered_set<u32> crossed;
@@ -459,12 +611,17 @@ ElementSet ringOf(const Mesh& mesh, const PointTable& points, EdgeId edge) {
             out.edges.push_back(e);
             for (u32 side = 0; side < 2; ++side) {
                 const HalfedgeId h = Topology::halfedge(EdgeId(e), side);
-                const FaceId f = topology.face(h);
-                if (!f.valid() || topology.valence(f) != 4 || !crossed.insert(f.value()).second) {
+                std::array<HalfedgeId, 4> sides;
+                if (!topology.face(h).valid() || walk.hidden(h) || !walk.quad(h, sides) ||
+                    crossed.count(topology.face(h).value()) != 0) {
                     continue;
                 }
-                out.faces.push_back(f.value());
-                const u64 opposite = walk.key(topology.next(topology.next(h)));
+                for (const HalfedgeId s : sides) {
+                    if (crossed.insert(topology.face(s).value()).second) {
+                        out.faces.push_back(topology.face(s).value());
+                    }
+                }
+                const u64 opposite = walk.key(sides[2]);
                 if (visited.insert(opposite).second) {
                     queue.push_back(opposite);
                 }
@@ -477,14 +634,14 @@ ElementSet ringOf(const Mesh& mesh, const PointTable& points, EdgeId edge) {
 
 } // namespace
 
-ElementSet EdgeRing(const Mesh& mesh, const PointTable& points, EdgeId edge) {
-    ElementSet ring = ringOf(mesh, points, edge);
+ElementSet EdgeRing(const Mesh& mesh, const PointTable& points, EdgeId edge, std::span<const u8> diagonals) {
+    ElementSet ring = ringOf(mesh, points, edge, diagonals);
     ring.faces.clear();
     return ring;
 }
 
-ElementSet FaceLoop(const Mesh& mesh, const PointTable& points, EdgeId edge) {
-    ElementSet ring = ringOf(mesh, points, edge);
+ElementSet FaceLoop(const Mesh& mesh, const PointTable& points, EdgeId edge, std::span<const u8> diagonals) {
+    ElementSet ring = ringOf(mesh, points, edge, diagonals);
     ring.edges.clear();
     return ring;
 }

@@ -1517,7 +1517,83 @@ QuadShape quadShape(const std::array<Vector3f, 4>& q) {
     return out;
 }
 
+struct Join {
+    f64 cost;
+    u32 edge;
+};
+
+/// Every edge whose two triangles To Quads may join (§3.2), cheapest first.
+/// @p chosen, per face, keeps it to those faces; empty is every face.
+std::vector<Join> joinCandidates(const Mesh& mesh, const std::vector<u8>& chosen, const JoinTrianglesParams& params) {
+    const std::span<const Vector3f> positions = positionsOf(mesh);
+    const Topology& topology = mesh.topology();
+    const auto wanted = [&](FaceId f) { return chosen.empty() || chosen[f.index()] != 0; };
+    std::vector<Join> candidates;
+    for (u32 e = 0; e < topology.edgeCount(); ++e) {
+        const EdgeId edge(e);
+        if (topology.isDeleted(edge) || topology.isBoundary(edge)) {
+            continue;
+        }
+        const HalfedgeId h0 = Topology::halfedge(edge, 0);
+        const HalfedgeId h1 = Topology::halfedge(edge, 1);
+        const FaceId fa = topology.face(h0);
+        const FaceId fb = topology.face(h1);
+        if (!wanted(fa) || !wanted(fb) || topology.valence(fa) != 3 || topology.valence(fb) != 3 ||
+            !joinable(mesh, edge, params.delimitFlagged)) {
+            continue;
+        }
+        const u32 a = topology.from(h0).value();
+        const u32 b = topology.to(h0).value();
+        const u32 c = topology.to(topology.next(h0)).value();
+        const u32 d = topology.to(topology.next(h1)).value();
+        const std::array<Vector3f, 4> quad{positions[a], positions[d], positions[b], positions[c]};
+        const QuadShape shape = quadShape(quad);
+        const f64 faceBend = angleBetween(triangleNormal(positions[a], positions[b], positions[c]),
+                                          triangleNormal(positions[b], positions[a], positions[d]));
+        if (!shape.convex || faceBend > params.faceAngle || shape.worstCorner > params.shapeAngle) {
+            continue;
+        }
+        candidates.push_back({shape.cost, e});
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const Join& x, const Join& y) {
+        return x.cost != y.cost ? x.cost < y.cost : x.edge < y.edge;
+    });
+    return candidates;
+}
+
 } // namespace
+
+std::vector<u8> JoinDiagonals(const Mesh& mesh) {
+    const JoinTrianglesParams params;
+    std::vector<u8> out;
+    if (!mesh.hasConnectivity()) {
+        return out;
+    }
+    const Topology& topology = mesh.topology();
+    // A mask even where nothing pairs: it is what tells a walker the mesh has
+    // triangles to pass.
+    for (u32 f = 0; f < topology.faceCount() && out.empty(); ++f) {
+        if (!topology.isDeleted(FaceId(f)) && topology.valence(FaceId(f)) == 3) {
+            out.assign(topology.edgeCount(), 0);
+        }
+    }
+    std::vector<u8> taken(topology.faceCount(), 0);
+    for (const Join& candidate : joinCandidates(mesh, {}, params)) {
+        const HalfedgeId h0 = Topology::halfedge(EdgeId(candidate.edge), 0);
+        const HalfedgeId h1 = Topology::halfedge(EdgeId(candidate.edge), 1);
+        const FaceId fa = topology.face(h0);
+        const FaceId fb = topology.face(h1);
+        // Two triangles on the same three vertices make no quad: the join skips them too.
+        if (taken[fa.index()] != 0 || taken[fb.index()] != 0 ||
+            topology.to(topology.next(h0)) == topology.to(topology.next(h1))) {
+            continue;
+        }
+        taken[fa.index()] = 1;
+        taken[fb.index()] = 1;
+        out[candidate.edge] = 1;
+    }
+    return out;
+}
 
 ModelPlan PlanJoinTriangles(Mesh& mesh, const PointTable& points, const ElementSet& faces,
                             const JoinTrianglesParams& params) {
@@ -1532,45 +1608,7 @@ ModelPlan PlanJoinTriangles(Mesh& mesh, const PointTable& points, const ElementS
         return plan;
     }
     const Mesh& readable = mesh;
-    const std::vector<u8> chosen = faceMask(readable, faces);
-    const std::span<const Vector3f> positions = positionsOf(readable);
-    struct Join {
-        f64 cost;
-        u32 edge;
-    };
-    std::vector<Join> candidates;
-    {
-        const Topology& topology = readable.topology();
-        for (u32 e = 0; e < topology.edgeCount(); ++e) {
-            const EdgeId edge(e);
-            if (topology.isDeleted(edge) || topology.isBoundary(edge)) {
-                continue;
-            }
-            const HalfedgeId h0 = Topology::halfedge(edge, 0);
-            const HalfedgeId h1 = Topology::halfedge(edge, 1);
-            const FaceId fa = topology.face(h0);
-            const FaceId fb = topology.face(h1);
-            if (chosen[fa.index()] == 0 || chosen[fb.index()] == 0 || topology.valence(fa) != 3 ||
-                topology.valence(fb) != 3 || !joinable(readable, edge, params.delimitFlagged)) {
-                continue;
-            }
-            const u32 a = topology.from(h0).value();
-            const u32 b = topology.to(h0).value();
-            const u32 c = topology.to(topology.next(h0)).value();
-            const u32 d = topology.to(topology.next(h1)).value();
-            const std::array<Vector3f, 4> quad{positions[a], positions[d], positions[b], positions[c]};
-            const QuadShape shape = quadShape(quad);
-            const f64 faceBend = angleBetween(triangleNormal(positions[a], positions[b], positions[c]),
-                                              triangleNormal(positions[b], positions[a], positions[d]));
-            if (!shape.convex || faceBend > params.faceAngle || shape.worstCorner > params.shapeAngle) {
-                continue;
-            }
-            candidates.push_back({shape.cost, e});
-        }
-    }
-    std::sort(candidates.begin(), candidates.end(), [](const Join& x, const Join& y) {
-        return x.cost != y.cost ? x.cost < y.cost : x.edge < y.edge;
-    });
+    const std::vector<Join> candidates = joinCandidates(readable, faceMask(readable, faces), params);
 
     std::vector<u8> taken(readable.topology().faceCount(), 0);
     std::unordered_map<u32, std::vector<u32>> rows;

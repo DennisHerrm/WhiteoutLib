@@ -248,6 +248,7 @@ struct JoinTrianglesParams {
 /// Joins pairs of triangles among @p faces into quads, cheapest first, never
 /// across a section, smoothing group or corner-value difference (§3.2). Each
 /// quad keeps both triangles as its row, so what the file gets is unchanged.
+/// `JoinDiagonals` (`select.h`) marks, without joining, the pairs it would.
 ModelPlan PlanJoinTriangles(Mesh& mesh, const PointTable& points, const ElementSet& faces,
                             const JoinTrianglesParams& params = {});
 

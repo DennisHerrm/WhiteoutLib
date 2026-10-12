@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <set>
 #include <utility>
 #include <vector>
@@ -67,6 +68,35 @@ Mesh grid(u32 w, u32 h, u32 creaseAt = 0) {
             // The cells right of the crease use its second copy.
             const auto at = [&](u32 cx, u32 cy) { return cx == creaseAt && x >= creaseAt ? twin[cx][cy] : id[cx][cy]; };
             faces.push_back({at(x, y), at(x + 1, y), at(x + 1, y + 1), at(x, y + 1)});
+        }
+    }
+    return fromFaces(faces, positions);
+}
+
+/// `grid`, each quad cut into two triangles, the cut leaning one way on the
+/// cells where x + y is even and the other way on the rest.
+Mesh triangles(u32 w, u32 h) {
+    std::vector<Vector3f> positions;
+    std::vector<std::vector<u32>> faces;
+    const auto at = [&](u32 x, u32 y) { return x * (h + 1) + y; };
+    for (u32 x = 0; x <= w; ++x) {
+        for (u32 y = 0; y <= h; ++y) {
+            positions.push_back(Vector3f{static_cast<f32>(x), static_cast<f32>(y), 0.0f});
+        }
+    }
+    for (u32 x = 0; x < w; ++x) {
+        for (u32 y = 0; y < h; ++y) {
+            const u32 a = at(x, y);
+            const u32 b = at(x + 1, y);
+            const u32 c = at(x + 1, y + 1);
+            const u32 d = at(x, y + 1);
+            if ((x + y) % 2 == 0) {
+                faces.push_back({a, b, c});
+                faces.push_back({a, c, d});
+            } else {
+                faces.push_back({a, b, d});
+                faces.push_back({b, c, d});
+            }
         }
     }
     return fromFaces(faces, positions);
@@ -200,6 +230,114 @@ TEST_CASE("wem select a ring crosses quads and a face loop is its faces", "[wem]
     const ElementSet faces = geom::FaceLoop(mesh, points, edgeAt(mesh, 1, 2, 2, 2));
     CHECK(faces.faces.size() == 4u);
     CHECK(faces.edges.empty());
+}
+
+TEST_CASE("wem select the diagonals of a triangulated grid are its cuts", "[wem][geometry][select]") {
+    const Mesh mesh = triangles(4, 4);
+    const std::vector<u8> diagonals = geom::JoinDiagonals(mesh);
+    REQUIRE(diagonals.size() == mesh.topology().edgeCount());
+    u32 marked = 0;
+    for (u32 e = 0; e < diagonals.size(); ++e) {
+        const Segment s = segmentOf(mesh, e);
+        const bool cut = s.first[0] != s.second[0] && s.first[1] != s.second[1];
+        CHECK((diagonals[e] != 0) == cut);
+        marked += diagonals[e];
+    }
+    CHECK(marked == 16u);
+    // A mesh of quads has none to step over.
+    CHECK(geom::JoinDiagonals(grid(4, 4)).empty());
+}
+
+TEST_CASE("wem select a loop and a ring walk the quads a triangulation cut", "[wem][geometry][select]") {
+    const Mesh mesh = triangles(4, 4);
+    const skinning::PointTable points = skinning::BuildPointTable(mesh);
+    const std::vector<u8> diagonals = geom::JoinDiagonals(mesh);
+    const EdgeId edge = edgeAt(mesh, 1, 2, 2, 2);
+    // Without them the loop stops at the first point a cut reaches, and the
+    // ring has no quad to cross.
+    CHECK(geom::EdgeLoop(mesh, points, edge).edges.size() == 2u);
+    CHECK(geom::EdgeRing(mesh, points, edge).edges.size() == 1u);
+    // With them it is the grid's own, as on the quads.
+    const ElementSet loop = geom::EdgeLoop(mesh, points, edge, diagonals);
+    CHECK(segments(mesh, loop.edges) ==
+          std::set<Segment>{{{0, 2}, {1, 2}}, {{1, 2}, {2, 2}}, {{2, 2}, {3, 2}}, {{3, 2}, {4, 2}}});
+    const ElementSet ring = geom::EdgeRing(mesh, points, edge, diagonals);
+    CHECK(segments(mesh, ring.edges) == std::set<Segment>{{{1, 0}, {2, 0}},
+                                                          {{1, 1}, {2, 1}},
+                                                          {{1, 2}, {2, 2}},
+                                                          {{1, 3}, {2, 3}},
+                                                          {{1, 4}, {2, 4}}});
+    // The face loop is both triangles of each quad crossed.
+    const ElementSet faces = geom::FaceLoop(mesh, points, edge, diagonals);
+    CHECK(faces.faces.size() == 8u);
+    CHECK(faces.edges.empty());
+    // The border still walks its border. A cut has no ring; its loop is the
+    // straight line of the cuts that carry it on, here the grid's long diagonal.
+    CHECK(geom::EdgeLoop(mesh, points, edgeAt(mesh, 1, 0, 2, 0), diagonals).edges.size() == 16u);
+    const EdgeId cut = edgeAt(mesh, 0, 0, 1, 1);
+    CHECK(geom::EdgeRing(mesh, points, cut, diagonals).edges == std::vector<u32>{cut.value()});
+    CHECK(geom::FaceLoop(mesh, points, cut, diagonals).faces.empty());
+    CHECK(segments(mesh, geom::EdgeLoop(mesh, points, cut, diagonals).edges) ==
+          std::set<Segment>{{{0, 0}, {1, 1}}, {{1, 1}, {2, 2}}, {{2, 2}, {3, 3}}, {{3, 3}, {4, 4}}});
+}
+
+/// A tube of @p segments quads round the z axis and @p rings high, each quad
+/// two triangles, with every vertex on a ring pushed off the grid by
+/// @p jitter so that no two triangles pair by shape alone.
+Mesh roughTube(u32 segments, u32 rings, f32 jitter) {
+    std::vector<Vector3f> positions;
+    std::vector<std::vector<u32>> faces;
+    for (u32 r = 0; r <= rings; ++r) {
+        for (u32 s = 0; s < segments; ++s) {
+            const f32 round = static_cast<f32>((r * 7 + s * 3) % 5) - 2.0f;
+            const f32 along = static_cast<f32>((r + s * 5) % 3) - 1.0f;
+            const f32 a = 6.2831853f * (static_cast<f32>(s) + jitter * round) / static_cast<f32>(segments);
+            positions.push_back(Vector3f{std::cos(a), std::sin(a), static_cast<f32>(r) * 0.6f + jitter * along});
+        }
+    }
+    for (u32 r = 0; r < rings; ++r) {
+        for (u32 s = 0; s < segments; ++s) {
+            const u32 n = (s + 1) % segments;
+            const u32 a = r * segments + s;
+            const u32 b = r * segments + n;
+            const u32 c = (r + 1) * segments + n;
+            const u32 d = (r + 1) * segments + s;
+            faces.push_back({a, b, c});
+            faces.push_back({a, c, d});
+        }
+    }
+    return fromFaces(faces, positions);
+}
+
+TEST_CASE("wem select a loop carries straight on where triangles do not pair", "[wem][geometry][select]") {
+    // No diagonal is marked, so nothing is walked as a quad: the rings round
+    // the tube are found by going straight on over its surface.
+    const Mesh mesh = roughTube(12, 6, 0.03f);
+    const skinning::PointTable points = skinning::BuildPointTable(mesh);
+    const std::vector<u8> none(mesh.topology().edgeCount(), 0);
+    const Topology& topology = mesh.topology();
+    const HalfedgeId h = topology.findHalfedge(VertexId(3 * 12 + 4), VertexId(3 * 12 + 5));
+    REQUIRE(h.valid());
+    const ElementSet loop = geom::EdgeLoop(mesh, points, Topology::edge(h), none);
+    // All the way round ring 3, and nothing off it.
+    CHECK(loop.edges.size() == 12u);
+    for (const u32 e : loop.edges) {
+        const HalfedgeId side = Topology::halfedge(EdgeId(e), 0);
+        CHECK(topology.from(side).value() / 12 == 3u);
+        CHECK(topology.to(side).value() / 12 == 3u);
+    }
+    // Up the tube from an edge between two rings, border to border.
+    const HalfedgeId up = topology.findHalfedge(VertexId(2 * 12 + 4), VertexId(3 * 12 + 4));
+    REQUIRE(up.valid());
+    const ElementSet column = geom::EdgeLoop(mesh, points, Topology::edge(up), none);
+    CHECK(column.edges.size() == 6u);
+    for (const u32 e : column.edges) {
+        const HalfedgeId side = Topology::halfedge(EdgeId(e), 0);
+        CHECK(topology.from(side).value() % 12 == 4u);
+        CHECK(topology.to(side).value() % 12 == 4u);
+    }
+    // Without a mask it is the quad rule alone, and stops where it stood.
+    CHECK(geom::EdgeLoop(mesh, points, Topology::edge(h)).edges.size() == 1u);
 }
 
 TEST_CASE("wem select grow and shrink by face steps", "[wem][geometry][select]") {

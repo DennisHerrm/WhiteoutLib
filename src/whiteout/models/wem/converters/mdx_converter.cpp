@@ -2728,9 +2728,8 @@ Result<mdx::Model> MdxConverter::toMdx(const Document& document, ProfileId profi
         case NodeKind::Attachment: {
             mdx::Attachment attachment;
             attachment.node = buildNode(i);
-            // The game sizes its id table by the last record's id and fills it
-            // by every record's, so ids have to climb: one with none of its own
-            // takes its place in ATCH, as in Blizzard's files.
+            // The id its file gave it, or its place in ATCH; the chunk's ids
+            // are checked as a whole under this loop.
             attachment.attachmentId = static_cast<u32>(out.attachments.size());
             if (const auto* id = node.native.find("mdxAttachmentId")) {
                 attachment.attachmentId = static_cast<u32>(id->value);
@@ -2951,6 +2950,24 @@ Result<mdx::Model> MdxConverter::toMdx(const Document& document, ProfileId profi
             break;
         }
         }
+    }
+
+    // The game sizes its id table by the LAST record's id, fills it by every
+    // record's, and hangs a model only on an id inside it (`ProcessAttachments`,
+    // `SpriteAddLink`). An id is a handle the name search returns and nothing
+    // outside the file states one, so a chunk whose ids do not climb -- as its
+    // file wrote them, or after an edit -- is numbered by place, as Blizzard's
+    // files are.
+    if (std::adjacent_find(out.attachments.begin(), out.attachments.end(),
+                           [](const mdx::Attachment& a, const mdx::Attachment& b) {
+                               return a.attachmentId >= b.attachmentId;
+                           }) != out.attachments.end()) {
+        for (std::size_t a = 0; a < out.attachments.size(); ++a) {
+            out.attachments[a].attachmentId = static_cast<u32>(a);
+        }
+        diagnostics.info(DiagCode::Unspecified,
+                         "the attachment ids did not climb through the file, which Warcraft III "
+                         "needs to find them all; numbered by place");
     }
 
     // --- materials ----------------------------------------------------------

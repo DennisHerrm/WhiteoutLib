@@ -936,6 +936,11 @@ Attachment {
 }
 ```
 
+`attachmentId` is the handle the game's name search returns for the point. Warcraft III 3.0
+sizes its id table by the **last** record's id and files every record under its own, so a model
+hangs only on an id no greater than the last one's: the ids must climb through the chunk.
+Blizzard's files number them `0..n-1`.
+
 ### 7.15 PIVT — Pivot Points
 
 **Tag:** `0x54564950` · **Element size:** 12 bytes · **Count:** `size / 12`

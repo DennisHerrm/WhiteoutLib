@@ -443,6 +443,39 @@ TEST_CASE("wem mdx numbers object ids by chunk, not by node order",
     CHECK(second.matrixIndices[0] == 1);
 }
 
+TEST_CASE("wem mdx attachment ids climb through the file", "[wem][convert][mdx][nodes]") {
+    // What a file's ids come back as, in the file's order.
+    const auto written = [](std::vector<u32> ids) {
+        mdx::Model model = makeModel();
+        for (const u32 id : ids) {
+            mdx::Attachment attachment;
+            attachment.node = makeNode("Point" + std::to_string(model.attachments.size()) + " Ref",
+                                       static_cast<u32>(model.pivotPoints.size()), 0);
+            attachment.attachmentId = id;
+            model.attachments.push_back(attachment);
+            model.pivotPoints.push_back(Vector3f{0, 0, 0});
+        }
+        const MdxConverter converter;
+        Result<Document> imported = converter.fromMdx(model);
+        REQUIRE(imported.ok());
+        Result<mdx::Model> exported = converter.toMdx(*imported, ProfileId::Wc3Classic, 800);
+        REQUIRE(exported.ok());
+        ids.clear();
+        for (const mdx::Attachment& attachment : exported->attachments) {
+            ids.push_back(attachment.attachmentId);
+        }
+        return ids;
+    };
+
+    // A hand-made footman's order. Warcraft III sizes its id table by the last
+    // record's id, here six entries, so nothing hung on 6, 7 or 8.
+    CHECK(written({0, 2, 3, 6, 7, 8, 1, 4, 5}) == std::vector<u32>{0, 1, 2, 3, 4, 5, 6, 7, 8});
+    // Two of one id answer for one point.
+    CHECK(written({2, 2}) == std::vector<u32>{0, 1});
+    // Ids that climb are the file's own, a gap included.
+    CHECK(written({0, 1, 3, 4}) == std::vector<u32>{0, 1, 3, 4});
+}
+
 TEST_CASE("wem mdx a cylinder and a plane keep their two vertices",
           "[wem][convert][mdx][nodes]") {
     // `CLID` stores two vertices for a box, a plane and a cylinder, and a

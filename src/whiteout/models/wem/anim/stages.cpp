@@ -107,6 +107,54 @@ void Place(const Animator& animator, const NodeTree& tree, Pose& pose, u32 node,
     animator.compose(pose);
 }
 
+bool SameFrame(const Matrix44f& a, const Matrix44f& b) {
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            if (std::fabs(a.data[r][c] - b.data[r][c]) > 1e-5f * std::max(1.0f, std::fabs(b.data[r][c]))) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/// Stands a held node where it is held, its scale the pose's own, unless it
+/// stands there already.
+void Stand(const Animator& animator, const NodeTree& tree, Pose& pose, const StageHold& hold) {
+    if (SameFrame(pose.frame[hold.node], hold.frame)) {
+        return;
+    }
+    Transform local = LocalOf(tree, pose, hold.node, hold.frame);
+    local.scale = pose.local[hold.node].scale;
+    pose.local[hold.node] = local;
+    animator.compose(pose);
+}
+
+/// How many nodes stand above @p node.
+u32 DepthOf(const NodeTree& tree, u32 node) {
+    u32 depth = 0;
+    for (u32 up = tree.nodes[node].parent; up < tree.size() && depth <= tree.size(); up = tree.nodes[up].parent) {
+        ++depth;
+    }
+    return depth;
+}
+
+/// @p held's nodes of @p pose, each once, parents first: standing one never
+/// moves one stood before it.
+std::vector<StageHold> InOrder(const NodeTree& tree, const Pose& pose, std::span<const StageHold> held) {
+    std::vector<StageHold> out;
+    for (const StageHold& hold : held) {
+        if (hold.node < tree.size() && hold.node < pose.frame.size() &&
+            std::none_of(out.begin(), out.end(), [&](const StageHold& other) { return other.node == hold.node; })) {
+            out.push_back(hold);
+        }
+    }
+    std::stable_sort(out.begin(), out.end(), [&](const StageHold& a, const StageHold& b) {
+        return DepthOf(tree, a.node) < DepthOf(tree, b.node);
+    });
+    return out;
+}
+
 /// @p frame's rotation alone, its rows unit length.
 Matrix44f Orientation(const Matrix44f& frame) {
     Matrix44f out = Matrix44f::identity();
@@ -288,11 +336,14 @@ LinkSwitches SwitchesOf(const Document& document, u32 modelIndex, const PoseStag
         if (play.loop && clip.duration > 0.0f && now > clip.duration) {
             now = std::fmod(now, clip.duration);
         }
+        // By the millisecond, as the tracks are read: a key switches at the
+        // sample that first reads its value, and none sees one without the other.
+        const u32 nowMs = Milliseconds(now);
         std::set<f32> times;
         for (const u32 id : channels) {
             if (const SubTrack* track = FindSubTrack(clip, id)) {
                 for (const f32 t : track->times) {
-                    if (t <= now + 1e-6f) {
+                    if (Milliseconds(t) <= nowMs) {
                         times.insert(t);
                     }
                 }
@@ -534,7 +585,9 @@ struct StageRunner::LinkPass {
         Mix mix;
         Pose pose;
         std::size_t done = 0;
+        std::vector<StageHold> held; ///< What was held then, parents first.
     };
+    const StageHolds* held = nullptr;
     Moment rest;
     bool rested = false;
     std::map<std::vector<i64>, Moment> moments;   ///< By `MomentOf`.
@@ -690,17 +743,30 @@ void StageRunner::constrainOne(const Animator& animator, const Mix& mix, Pose& p
 }
 
 StageRunner::LinkReading StageRunner::linkReading(const Animator& animator, const Mix* mix, const PoseStage& stage,
-                                                  LinkPass& pass) const {
+                                                  LinkPass& pass, f32 ago) const {
     const NodeTree& tree = model_->nodes;
     const std::vector<PoseStage>& stages = model_->poseStages;
     const std::size_t index = static_cast<std::size_t>(&stage - stages.data());
     const auto read = [&](const Pose& pose) {
         return LinkReading{Carriers(tree, stage, stage.driven.front(), pose), CarrierShares(*model_, stage, pose)};
     };
-    const auto begin = [&](LinkPass::Moment& moment, const Mix& at) {
+    // What the pass holds stands where it stood at the moment read.
+    const auto begin = [&](LinkPass::Moment& moment, const Mix& at, bool resting) {
         moment = LinkPass::Moment{};
         moment.mix = at;
         animator.evaluate(at, moment.pose);
+        if (resting || pass.held == nullptr) {
+            return;
+        }
+        constexpr f32 kNow = 1e-6f;
+        std::span<const StageHold> then = pass.held->now;
+        if (ago > kNow) {
+            then = pass.held->earlier ? pass.held->earlier(ago) : std::span<const StageHold>{};
+        }
+        moment.held = InOrder(tree, moment.pose, then);
+        for (const StageHold& hold : moment.held) {
+            Stand(animator, tree, moment.pose, hold);
+        }
     };
     // The stages before this one onto @p moment's pose. A stage is on it by
     // the time `done` passes it, so a Link reading itself at the moment it is
@@ -710,7 +776,7 @@ StageRunner::LinkReading StageRunner::linkReading(const Animator& animator, cons
             const PoseStage& earlier = stages[moment.done];
             // At rest a Link stands its node where its parent puts it: nothing to run.
             if (earlier.enabled && !IsPhysicsStage(earlier.kind) && !(resting && earlier.kind == StageKind::Link)) {
-                constrainOne(animator, moment.mix, moment.pose, earlier, pass);
+                constrainHeld(animator, moment.mix, moment.pose, earlier, pass, moment.held);
             }
         }
     };
@@ -722,7 +788,7 @@ StageRunner::LinkReading StageRunner::linkReading(const Animator& animator, cons
         if (!pass.rested || pass.rest.done > index) {
             Mix rest;
             rest.globals = false;
-            begin(pass.rest, rest);
+            begin(pass.rest, rest, true);
             pass.rested = true;
         }
         step(pass.rest, true);
@@ -731,13 +797,13 @@ StageRunner::LinkReading StageRunner::linkReading(const Animator& animator, cons
     const auto [found, fresh] = pass.moments.try_emplace(MomentOf(*mix));
     LinkPass::Moment& moment = found->second;
     if (fresh) {
-        begin(moment, *mix);
+        begin(moment, *mix, false);
     }
     if (moment.done > index) {
         // Stepped past it for a later stage: once more from the start, on the
         // carries the pass holds of the Links between.
         LinkPass::Moment again;
-        begin(again, *mix);
+        begin(again, *mix, false);
         step(again, false);
         return read(again.pose);
     }
@@ -785,7 +851,7 @@ StageRunner::LinkCarry StageRunner::linkCarry(const Animator& animator, const Mi
             held = CarrierShares(*model_, stage, before);
         }
         const Mix then = shifted(t);
-        const LinkReading at = linkReading(animator, &then, stage, pass);
+        const LinkReading at = linkReading(animator, &then, stage, pass, switches.now - t);
         if (SameShares(at.shares, held)) {
             continue;
         }
@@ -941,13 +1007,57 @@ void StageRunner::run(const Animator& animator, const Mix& mix, Pose& pose, f32 
 }
 
 void StageRunner::constrain(const Animator& animator, const Mix& mix, Pose& pose) const {
+    constrain(animator, mix, pose, StageHolds{});
+}
+
+void StageRunner::constrain(const Animator& animator, const Mix& mix, Pose& pose, const StageHolds& held) const {
     if (model_ == nullptr) {
         return;
     }
     LinkPass pass;
+    pass.held = &held;
+    const std::vector<StageHold> now = InOrder(model_->nodes, pose, held.now);
+    for (const StageHold& hold : now) {
+        Stand(animator, model_->nodes, pose, hold);
+    }
     for (const PoseStage& stage : model_->poseStages) {
         if (stage.enabled && !IsPhysicsStage(stage.kind)) {
-            constrainOne(animator, mix, pose, stage, pass);
+            constrainHeld(animator, mix, pose, stage, pass, now);
+        }
+    }
+}
+
+void StageRunner::constrainHeld(const Animator& animator, const Mix& mix, Pose& pose, const PoseStage& stage,
+                                LinkPass& pass, std::span<const StageHold> held) const {
+    if (held.empty()) {
+        constrainOne(animator, mix, pose, stage, pass);
+        return;
+    }
+    const NodeTree& tree = model_->nodes;
+    const auto holds = [&](u32 node) {
+        return std::any_of(held.begin(), held.end(), [&](const StageHold& hold) { return hold.node == node; });
+    };
+    // Every node it drives is held: what holds them has the stage's say.
+    bool any = false;
+    bool all = true;
+    for (const u32 node : stage.driven) {
+        if (ValidNode(tree, node)) {
+            any = true;
+            all = all && holds(node);
+        }
+    }
+    if (any && all) {
+        return;
+    }
+    constrainOne(animator, mix, pose, stage, pass);
+    // What it moved or carried of the held nodes, back where they are held.
+    for (const StageHold& hold : held) {
+        u32 climbed = 0;
+        for (u32 up = hold.node; up < tree.size() && climbed <= tree.size(); up = tree.nodes[up].parent, ++climbed) {
+            if (std::find(stage.driven.begin(), stage.driven.end(), up) != stage.driven.end()) {
+                Stand(animator, tree, pose, hold);
+                break;
+            }
         }
     }
 }
@@ -962,6 +1072,135 @@ void StageRunner::reset(const StageHooks* hooks) {
             hooks->reset(modelIndex_, stage);
         }
     }
+}
+
+SimulatedStages::SimulatedStages(const Document& document, u32 model, SimulatedSteps& steps)
+    : stages_(document, model), steps_(steps) {
+    if (model >= document.models.size()) {
+        return;
+    }
+    model_ = &document.models[model];
+    const NodeTree& tree = model_->nodes;
+    for (const PoseStage& stage : model_->poseStages) {
+        if (!stage.enabled || IsPhysicsStage(stage.kind)) {
+            continue;
+        }
+        for (const u32 node : stage.driven) {
+            if (ValidNode(tree, node) && std::find(driven_.begin(), driven_.end(), node) == driven_.end()) {
+                driven_.push_back(node);
+            }
+        }
+    }
+    std::stable_sort(driven_.begin(), driven_.end(),
+                     [&](u32 a, u32 b) { return DepthOf(tree, a) < DepthOf(tree, b); });
+    for (u32 n = 0; n < tree.size(); ++n) {
+        if (tree.nodes[n].kind == NodeKind::ForceField) {
+            fields_.push_back(n);
+        }
+    }
+    // A Link reads back to its clip's start at most.
+    for (const Clip& clip : document.clips) {
+        if (clip.model == model) {
+            keep_ = std::max(keep_, clip.duration);
+        }
+    }
+    keep_ += 1.0f;
+}
+
+StageHolds SimulatedStages::holds(f32 seconds, std::span<const StageHold> now) const {
+    StageHolds out;
+    out.now = now;
+    out.earlier = [this, seconds, now](f32 ago) -> std::span<const StageHold> {
+        // Nearer this step than the last one kept: this step's.
+        const f32 at = seconds - ago;
+        if (steps_.times.empty() || at >= (steps_.times.back() + seconds) * 0.5f) {
+            return now;
+        }
+        auto found = std::lower_bound(steps_.times.begin(), steps_.times.end(), at);
+        if (found == steps_.times.end() || (found != steps_.times.begin() && at - *(found - 1) < *found - at)) {
+            --found;
+        }
+        return steps_.held[static_cast<std::size_t>(found - steps_.times.begin())];
+    };
+    return out;
+}
+
+void SimulatedStages::before(const Animator& animator, const Mix& mix, f32 seconds, Pose& pose,
+                             std::span<const u8> simulated) {
+    steps_.led = false;
+    if (empty()) {
+        return;
+    }
+    steps_.tracks = pose;
+    stages_.constrain(animator, mix, pose);
+    // What the last step wrote and the coming one still moves.
+    std::vector<StageHold> lag;
+    if (!steps_.held.empty()) {
+        for (const StageHold& hold : steps_.held.back()) {
+            if (hold.node < simulated.size() && simulated[hold.node] != 0) {
+                lag.push_back(hold);
+            }
+        }
+    }
+    if (lag.empty()) {
+        return;
+    }
+    steps_.read = steps_.tracks;
+    stages_.constrain(animator, mix, steps_.read, holds(seconds, lag));
+    // The pose stays the animation's but for the constrained nodes, which
+    // stand where the simulation puts what they read; one it moves itself is
+    // its own.
+    const NodeTree& tree = model_->nodes;
+    std::vector<Matrix44f> fields;
+    for (const u32 node : fields_) {
+        fields.push_back(pose.frame[node]);
+    }
+    for (const u32 node : driven_) {
+        const bool own = std::any_of(lag.begin(), lag.end(), [&](const StageHold& hold) { return hold.node == node; });
+        if (!own) {
+            Stand(animator, tree, pose, StageHold{node, steps_.read.frame[node]});
+        }
+    }
+    for (std::size_t f = 0; f < fields_.size(); ++f) {
+        pose.frame[fields_[f]] = fields[f];
+    }
+    steps_.led = true;
+}
+
+void SimulatedStages::after(const Animator& animator, const Mix& mix, f32 seconds, Pose& pose,
+                            std::span<const u8> written) {
+    if (empty()) {
+        return;
+    }
+    std::vector<StageHold> held;
+    for (u32 node = 0; node < written.size() && node < pose.frame.size(); ++node) {
+        if (written[node] != 0) {
+            held.push_back(StageHold{node, pose.frame[node]});
+        }
+    }
+    // Nothing simulated and nothing led: the pose is the animation's already.
+    if (!held.empty() || steps_.led) {
+        steps_.read = steps_.tracks;
+        for (const StageHold& hold : held) {
+            steps_.read.local[hold.node].translation = pose.local[hold.node].translation;
+            steps_.read.local[hold.node].rotation = pose.local[hold.node].rotation;
+        }
+        animator.compose(steps_.read);
+        stages_.constrain(animator, mix, steps_.read, holds(seconds, held));
+        for (const u32 node : fields_) {
+            steps_.read.frame[node] = pose.frame[node];
+        }
+        std::swap(pose, steps_.read);
+    }
+    // Kept for as long as a Link can read back.
+    if (steps_.times.size() > 64 && steps_.times[steps_.times.size() / 2] < seconds - keep_) {
+        const auto half = static_cast<std::ptrdiff_t>(steps_.times.size() / 2);
+        steps_.times.erase(steps_.times.begin(), steps_.times.begin() + half);
+        steps_.held.erase(steps_.held.begin(), steps_.held.begin() + half);
+    }
+    steps_.times.push_back(seconds);
+    steps_.held.push_back(std::move(held));
+    steps_.led = false;
 }
 
 namespace {

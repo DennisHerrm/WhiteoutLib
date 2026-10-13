@@ -19,8 +19,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 
 namespace whiteout {
@@ -43,8 +45,239 @@ const ClipPhysics& SettingsOf(const Clip& clip) {
     return clip.physics.has_value() ? *clip.physics : kNone;
 }
 
+/// One stretch of a clip a bake keyed on a channel (`PhysicsBake::stretchTimes`):
+/// its keys run from @p from to @p to, the simulation's own from @p first
+/// (before @p from where none of them is).
+struct Stretch {
+    f32 from = 0.0f;
+    f32 first = 0.0f;
+    f32 to = 0.0f;
+};
+
+/// A stretch's end at the clip's own: no key lies beyond.
+constexpr f32 kEver = std::numeric_limits<f32>::max();
+/// What a stretch reaches past its last key, so a key on its edge is inside.
+constexpr f32 kStretchPad = 1e-5f;
+
+/// @p channel's stretches in @p record and its place in the record's lists;
+/// none for a channel the bake keys whole.
+std::optional<std::size_t> StretchesOf(const PhysicsBake& record, u32 channel, std::vector<Stretch>& out) {
+    out.clear();
+    std::size_t at = 0;
+    for (std::size_t i = 0; i < record.stretchChannels.size() && i < record.stretchCounts.size(); ++i) {
+        const std::size_t count = record.stretchCounts[i];
+        if (record.stretchChannels[i] != channel) {
+            at += count;
+            continue;
+        }
+        for (std::size_t k = at; k < at + count && k * 3 + 2 < record.stretchTimes.size(); ++k) {
+            out.push_back(
+                Stretch{record.stretchTimes[k * 3], record.stretchTimes[k * 3 + 1], record.stretchTimes[k * 3 + 2]});
+        }
+        return i;
+    }
+    return std::nullopt;
+}
+
+bool Within(const std::vector<Stretch>& stretches, f32 time) {
+    return std::any_of(stretches.begin(), stretches.end(),
+                       [&](const Stretch& s) { return time >= s.from && time <= s.to; });
+}
+
+/// @p track's keys inside @p stretches, or those outside, hashed with its
+/// controller.
+void HashKeys(u64& hash, const SubTrack& track, const std::vector<Stretch>& stretches, bool inside) {
+    const u8 interp = static_cast<u8>(track.interp);
+    Hash(hash, std::span<const u8>(&interp, 1));
+    const std::size_t count = track.times.size();
+    const std::size_t each = count != 0 ? track.values.size() / count : 0;
+    for (std::size_t k = 0; k < count; ++k) {
+        if (Within(stretches, track.times[k]) != inside) {
+            continue;
+        }
+        Hash(hash, std::span<const u8>(reinterpret_cast<const u8*>(&track.times[k]), sizeof(f32)));
+        Hash(hash, std::span<const u8>(track.values.data() + k * each, each));
+    }
+}
+
+/// @p channel's keys in @p clip outside @p stretches, hashed: the clip's own
+/// animation beside a bake's keys (`PhysicsBake::stretchOutside`).
+u64 OutsideHash(const Clip& clip, u32 channel, const std::vector<Stretch>& stretches) {
+    u64 hash = 1469598103934665603ull;
+    for (const SubTrackContainer& container : clip.containers) {
+        for (const SubTrack& track : container.subTracks) {
+            if (track.channel == channel) {
+                HashKeys(hash, track, stretches, false);
+            }
+        }
+    }
+    return hash;
+}
+
+/// A baked channel's own animation as it now stands, on what the bake replaced
+/// (§8.4): @p now's keys outside @p stretches, and @p source's inside them.
+/// On a @p node's channel:
+/// - a stretch the user emptied stays empty: what the bake replaced there is
+///   not put back under keys taken away;
+/// - where the key the animation leaves for a stretch from was changed, it
+///   holds to where the simulation takes over. What the bake replaced goes on
+///   from there, out of sight in the baked clip, and would pull the new pose
+///   toward a key no one sees.
+template <class T>
+SubTrack OwnAnimation(const SubTrack* now, const SubTrack* source, const std::vector<Stretch>& stretches, bool node) {
+    const std::vector<CurveKey<T>> ours = now != nullptr ? DecodeKeys<T>(*now) : std::vector<CurveKey<T>>{};
+    const std::vector<CurveKey<T>> theirs = source != nullptr ? DecodeKeys<T>(*source) : std::vector<CurveKey<T>>{};
+    SubTrack out;
+    out.interp = now != nullptr ? now->interp : source->interp;
+    const bool alike = source != nullptr && source->interp == out.interp;
+    const auto same = [](const T& a, const T& b) { return std::memcmp(&a, &b, sizeof(T)) == 0; };
+    std::vector<CurveKey<T>> keys;
+    for (const CurveKey<T>& key : ours) {
+        if (!Within(stretches, key.time)) {
+            keys.push_back(key);
+        }
+    }
+    const std::size_t outside = keys.size();
+    // The source's own key at @p time, where the bake left it standing.
+    const auto stood = [&](f32 time) -> const CurveKey<T>* {
+        for (const CurveKey<T>& key : theirs) {
+            if (key.time == time && !Within(stretches, key.time)) {
+                return &key;
+            }
+        }
+        return nullptr;
+    };
+    for (const Stretch& s : stretches) {
+        const auto in = [&](const CurveKey<T>& key) { return key.time >= s.from && key.time <= s.to; };
+        // The keys beside it: the last the animation has before, the first after.
+        std::optional<std::size_t> before, after;
+        for (std::size_t i = 0; i < outside; ++i) {
+            if (keys[i].time < s.from && (!before || keys[i].time > keys[*before].time)) {
+                before = i;
+            }
+            if (keys[i].time > s.to && (!after || keys[i].time < keys[*after].time)) {
+                after = i;
+            }
+        }
+        // A smooth neighbour got its half of the span the bake split: its own
+        // tangent again, toward what is put back.
+        if (alike && before) {
+            if (const CurveKey<T>* was = stood(keys[*before].time); was != nullptr && same(was->value, keys[*before].value)) {
+                keys[*before].out = was->out;
+            }
+        }
+        if (alike && after) {
+            if (const CurveKey<T>* was = stood(keys[*after].time); was != nullptr && same(was->value, keys[*after].value)) {
+                keys[*after].in = was->in;
+            }
+        }
+        if (node && std::none_of(ours.begin(), ours.end(), in)) {
+            continue;
+        }
+        const std::size_t hidden = keys.size();
+        for (const CurveKey<T>& key : theirs) {
+            if (!in(key)) {
+                continue;
+            }
+            CurveKey<T> kept = key;
+            if (!alike) {
+                kept.in = kept.out = FlatTangent(out.interp, kept.value);
+                kept.tcb = Vector3f{0, 0, 0};
+            }
+            keys.push_back(kept);
+        }
+        if (!node || keys.size() == hidden || s.first < s.from || !before) {
+            continue;
+        }
+        const CurveKey<T>* left = nullptr;
+        for (const CurveKey<T>& key : theirs) {
+            if (key.time < s.from && !Within(stretches, key.time) && (left == nullptr || key.time > left->time)) {
+                left = &key;
+            }
+        }
+        if (left != nullptr && left->time == keys[*before].time && same(left->value, keys[*before].value)) {
+            continue;
+        }
+        CurveKey<T> hold;
+        hold.time = s.first;
+        hold.value = keys[*before].value;
+        hold.in = hold.out = FlatTangent(out.interp, hold.value);
+        keys.erase(std::remove_if(keys.begin() + static_cast<std::ptrdiff_t>(hidden), keys.end(),
+                                  [&](const CurveKey<T>& key) {
+                                      return Milliseconds(key.time) == Milliseconds(hold.time);
+                                  }),
+                   keys.end());
+        keys.push_back(hold);
+    }
+    std::stable_sort(keys.begin(), keys.end(),
+                     [](const CurveKey<T>& a, const CurveKey<T>& b) { return a.time < b.time; });
+    EncodeKeys(out, keys);
+    return out;
+}
+
+/// The clip's own keys on each channel a bake keyed in stretches, where they
+/// are no longer what the bake left there (§8.4): the track an Unbake puts
+/// back for it, by channel, with no key where the channel is left unkeyed.
+std::map<u32, SubTrack> OwnAnimations(const Clip& clip, const PhysicsBake& baked) {
+    std::map<u32, SubTrack> out;
+    std::vector<Stretch> stretches;
+    for (std::size_t i = 0; i < baked.stretchChannels.size() && i < baked.stretchOutside.size(); ++i) {
+        const u32 channel = baked.stretchChannels[i];
+        if (std::find(baked.channels.begin(), baked.channels.end(), channel) == baked.channels.end() ||
+            StretchesOf(baked, channel, stretches) != i) {
+            continue;
+        }
+        const SubTrack* now = nullptr;
+        for (const SubTrackContainer& container : clip.containers) {
+            if (const SubTrack* found = container.find(channel); found != nullptr && now == nullptr) {
+                now = found;
+            }
+        }
+        // One layer's keys: a channel the source keyed in several is put back whole.
+        const SubTrack* source = nullptr;
+        u32 layers = 0;
+        for (const SubTrackContainer& container : baked.source) {
+            if (const SubTrack* found = container.find(channel); found != nullptr) {
+                source = found;
+                ++layers;
+            }
+        }
+        const SubTrack* sized = now != nullptr && !now->times.empty() ? now : source;
+        if (layers > 1 || sized == nullptr || sized->times.empty()) {
+            continue;
+        }
+        if (now != nullptr && now->times.empty()) {
+            now = nullptr;
+        }
+        const std::size_t bytes = sized->values.size() / sized->times.size() / ValuesPerKey(sized->interp);
+        // As the bake left them, with its own keys still in every stretch:
+        // what it replaced goes back whole.
+        const bool emptied = bytes != sizeof(f32) && std::any_of(stretches.begin(), stretches.end(), [&](const Stretch& s) {
+            return now == nullptr ||
+                   std::none_of(now->times.begin(), now->times.end(), [&](f32 t) { return t >= s.from && t <= s.to; });
+        });
+        if (!emptied && OutsideHash(clip, channel, stretches) == baked.stretchOutside[i]) {
+            continue;
+        }
+        SubTrack made;
+        if (bytes == sizeof(Quaternion)) {
+            made = OwnAnimation<Quaternion>(now, source, stretches, true);
+        } else if (bytes == sizeof(Vector3f)) {
+            made = OwnAnimation<Vector3f>(now, source, stretches, true);
+        } else if (bytes == sizeof(f32)) {
+            made = OwnAnimation<f32>(now, source, stretches, false);
+        } else {
+            continue;
+        }
+        made.channel = channel;
+        out.emplace(channel, std::move(made));
+    }
+    return out;
+}
+
 /// @p clip's baked channels' sub-tracks swapped back for what the bake
-/// replaced, each in the place it had.
+/// replaced, each in the place it had. A key the user set or changed outside
+/// the stretch the bake keyed is the clip's own, and stays (`OwnAnimations`).
 void RestoreSource(Clip& clip) {
     if (!clip.physics.has_value() || !clip.physics->baked.has_value()) {
         return;
@@ -53,6 +286,8 @@ void RestoreSource(Clip& clip) {
     const auto written = [&](u32 channel) {
         return std::find(baked.channels.begin(), baked.channels.end(), channel) != baked.channels.end();
     };
+    std::map<u32, SubTrack> own = OwnAnimations(clip, baked);
+    std::set<u32> placed;
     std::size_t at = 0;
     for (std::size_t c = 0; c < clip.containers.size(); ++c) {
         std::vector<SubTrack>& tracks = clip.containers[c].subTracks;
@@ -60,11 +295,29 @@ void RestoreSource(Clip& clip) {
         if (c >= baked.source.size()) {
             continue;
         }
-        // In ascending place, so each lands where it was.
+        // In ascending place, so each lands where it was; one left unkeyed
+        // moves those after it up.
+        std::size_t gone = 0;
         for (const SubTrack& track : baked.source[c].subTracks) {
             const u32 place = at < baked.positions.size() ? baked.positions[at] : static_cast<u32>(tracks.size());
             ++at;
-            tracks.insert(tracks.begin() + std::min<std::size_t>(place, tracks.size()), track);
+            const auto kept = own.find(track.channel);
+            if (kept != own.end()) {
+                placed.insert(track.channel);
+                if (kept->second.times.empty()) {
+                    ++gone;
+                    continue;
+                }
+            }
+            const std::size_t where = place >= gone ? place - gone : 0;
+            tracks.insert(tracks.begin() + std::min<std::size_t>(where, tracks.size()),
+                          kept != own.end() ? kept->second : track);
+        }
+    }
+    // One the clip did not key before the bake: after its tracks, as a first key lands.
+    for (auto& [channel, track] : own) {
+        if (placed.count(channel) == 0 && !track.times.empty() && !clip.containers.empty()) {
+            clip.containers.front().subTracks.push_back(std::move(track));
         }
     }
 }
@@ -237,6 +490,33 @@ u64 WrittenHash(const Clip& clip, const PhysicsBake& record) {
     return hash;
 }
 
+/// What a bake wrote into @p clip and no one else keys, hashed as it stands
+/// (`PhysicsBake::stretchInside`): a channel keyed in stretches by its keys
+/// inside them, any other whole.
+u64 InsideHash(const Clip& clip, const PhysicsBake& record) {
+    u64 hash = 1469598103934665603ull;
+    std::vector<Stretch> stretches;
+    for (const SubTrackContainer& container : clip.containers) {
+        for (const SubTrack& track : container.subTracks) {
+            if (std::find(record.channels.begin(), record.channels.end(), track.channel) == record.channels.end()) {
+                continue;
+            }
+            if (StretchesOf(record, track.channel, stretches).has_value()) {
+                HashKeys(hash, track, stretches, true);
+            } else {
+                Hash(hash, ReflectBytes(track));
+            }
+        }
+    }
+    return hash;
+}
+
+/// Where a record's bake keyed, and what it left (`PhysicsBake::stretchChannels`
+/// on): nothing a bake reads, and a record made before them has none, so
+/// never in a key.
+constexpr std::string_view kStretchLists[] = {"stretchChannels", "stretchCounts", "stretchTimes", "stretchOutside",
+                                              "stretchInside"};
+
 /// The lists and the flag soft bodies added to the records a bake's inputs hold.
 constexpr std::string_view kSoftLists[] = {"soft",        "softIds",  "softLumps", "softKeys",     "softWithin",
                                            "softFollows", "softPush", "softAtEnd", "softChannels", "softSource",
@@ -245,9 +525,12 @@ constexpr std::string_view kSoftLists[] = {"soft",        "softIds",  "softLumps
 /// Every bound a document states is measured from what it holds, a baked
 /// clip's keys among it (Recompute Extents, which every save runs), and a bake
 /// reads none of them: in the key, a clip went out of date at its own save.
-constexpr std::string_view kMeasured[] = {"bounds"};
+/// With them, the stretch lists.
+constexpr std::string_view kMeasured[] = {"bounds",       "stretchChannels", "stretchCounts",
+                                          "stretchTimes", "stretchOutside",  "stretchInside"};
 
-/// `ReflectBytes` for a bake's key: the bounds left out unless @p bounds, and
+/// `ReflectBytes` for a bake's key: the stretch lists left out, the bounds too
+/// unless @p bounds, and
 /// with @p lists the soft lists too while they are empty or off, so a model
 /// with no soft body hashes as it did before there were any and a clip baked
 /// then does not read out of date.
@@ -257,7 +540,9 @@ std::vector<u8> InputBytes(const T& value, bool bounds, bool lists = false) {
     if (lists) {
         visitor.omitEmpty = kSoftLists;
     }
-    if (!bounds) {
+    if (bounds) {
+        visitor.omit = kStretchLists;
+    } else {
         visitor.omit = kMeasured;
     }
     visitor.field("", const_cast<T&>(value));
@@ -347,6 +632,14 @@ u64 Inputs(const Document& document, u32 clip, bool bounds) {
     if (!model.physics.soft.empty()) {
         const u8 fit = 1; // 1: the lumps of a point turn and scale alike (2026-10-12).
         Hash(hash, std::span<const u8>(&fit, 1));
+    }
+    // How a constraint reads the run is the library's as well: one made while
+    // they read the animation alone holds keys a Rebake no longer writes. Said
+    // only of a model with one, so every other key reads as it did.
+    if (std::any_of(model.poseStages.begin(), model.poseStages.end(),
+                    [](const PoseStage& stage) { return stage.enabled && !IsPhysicsStage(stage.kind); })) {
+        const u8 reads = 1; // 1: the simulated pose (2026-10-12).
+        Hash(hash, std::span<const u8>(&reads, 1));
     }
     // What a once-played clip's end is matched into, as it stands: a Rebake of
     // it makes this clip out of date (§7.4).
@@ -487,12 +780,31 @@ BakeRun SimulateClip(const Document& given, u32 clip, const BakeHooks& hooks, co
             }
         }
     }
+    // What a blast is placed and sized by: the bodied nodes alone.
+    const std::vector<u32> bodied(nodes.begin(), nodes.end());
+    // A node a constraint or IK stage drives is recorded too: where it stands
+    // while the run moves what it reads, and what a stage's other bones do
+    // while it moves one of them.
+    for (const PoseStage& stage : owner.poseStages) {
+        if (!stage.enabled || IsPhysicsStage(stage.kind)) {
+            continue;
+        }
+        for (const u32 node : stage.driven) {
+            if (node < owner.nodes.size()) {
+                nodes.insert(node);
+            }
+        }
+    }
     run.nodes.assign(nodes.begin(), nodes.end());
     hooks.reset(document, model, movable);
     std::vector<std::unique_ptr<ClothBoneFit>> fits;
 
     const Animator animator(document, model);
-    const StageRunner stages(document, model);
+    // The constraints read the bodies where each step leaves them.
+    SimulatedSteps kept;
+    SimulatedStages around(document, model, kept);
+    std::vector<u8> simulated(owner.nodes.size(), 0);
+    std::vector<u8> wrote(owner.nodes.size(), 0);
     // The root, whose animated height a floor that follows it takes.
     u32 root = 0;
     while (root < owner.nodes.size() && owner.nodes.nodes[root].parent < owner.nodes.size()) {
@@ -550,19 +862,30 @@ BakeRun SimulateClip(const Document& given, u32 clip, const BakeHooks& hooks, co
             }
             Pose pose;
             animator.evaluate(mix, pose);
-            if (!stages.empty()) {
-                stages.constrain(animator, mix, pose);
+            readers[p].read(local, previous, now);
+            if (!around.empty()) {
+                // By node: what this step writes, and what of it is still the
+                // simulation's own (a body being handed back is not).
+                std::fill(simulated.begin(), simulated.end(), u8{0});
+                std::fill(wrote.begin(), wrote.end(), u8{0});
+                for (u32 b = 0; b < run.bodies && b < now.size(); ++b) {
+                    const u32 node = owner.physics.bodies[b].node;
+                    if (node < wrote.size() && now[b].active) {
+                        wrote[node] = 1;
+                        simulated[node] = simulated[node] | static_cast<u8>(now[b].dynamic() ? 1 : 0);
+                    }
+                }
+                around.before(animator, mix, mix.worldSeconds, pose, simulated);
             }
             if (piece.step + k == 0) {
                 bool any = false;
-                for (const u32 n : run.nodes) {
+                for (const u32 n : bodied) {
                     const Vector3f o{pose.frame[n].data[3][0], pose.frame[n].data[3][1], pose.frame[n].data[3][2]};
                     lower = any ? Vector3f{std::min(lower.x, o.x), std::min(lower.y, o.y), std::min(lower.z, o.z)} : o;
                     upper = any ? Vector3f{std::max(upper.x, o.x), std::max(upper.y, o.y), std::max(upper.z, o.z)} : o;
                     any = true;
                 }
             }
-            readers[p].read(local, previous, now);
             BakeStep step;
             step.switches = now;
             step.world = own.world;
@@ -574,6 +897,7 @@ BakeRun SimulateClip(const Document& given, u32 clip, const BakeHooks& hooks, co
             step.lower = lower;
             step.upper = upper;
             hooks.step(document, model, step, pose);
+            around.after(animator, mix, mix.worldSeconds, pose, wrote);
             if (hooks.cloth) {
                 cloth.cloths.clear();
                 cloth.particles.clear();
@@ -690,6 +1014,9 @@ struct Written {
     u32 node = kInvalidNode;
     std::vector<Transform> samples; ///< Steps 0 .. steps.
     std::vector<u8> active;         ///< Per step, whether a body on it was simulated.
+    /// Per step, whether the recording is written though none was: a stage it
+    /// shares moved another of its nodes, or the match moved it.
+    std::vector<u8> taken;
 };
 
 /// The loop matched (§7.3): its end or start blended with the cycle beside it,
@@ -783,10 +1110,17 @@ f32 OffLine(const Quaternion& a, const Quaternion& b, f32 u, const Quaternion& q
 /// step outside each span on the source's curve, split exactly, and the baked
 /// samples inside, those within @p noise (a share of @p height) of a line
 /// left out. @p kept gets the times a reduction must keep.
+///
+/// A @p staged node's keys stand before its constraint and its samples after
+/// it, and the stage is on up to the span and off inside: the edge keys sit a
+/// millisecond out, the nearest the tracks are read, so no moment plays one
+/// blended into the other. Its span's ends are kept and its slope is its own.
+/// @p own gets the stretches it keyed (`PhysicsBake::stretchTimes`).
 template <class T>
 void Splice(const SubTrack* source, Interpolation interp, const std::vector<Transform>& samples,
             const std::vector<std::pair<u32, u32>>& spans, f32 dt, u32 stride, f32 noise, f32 height,
-            const std::vector<T>& animation, SubTrack& out, std::vector<f32>& kept) {
+            const std::vector<T>& animation, bool staged, SubTrack& out, std::vector<f32>& kept,
+            std::vector<Stretch>& own) {
     constexpr bool kQuat = std::is_same_v<T, Quaternion>;
     const u32 steps = static_cast<u32>(samples.size()) - 1;
     std::vector<CurveKey<T>> src = source != nullptr ? DecodeKeys<T>(*source) : std::vector<CurveKey<T>>{};
@@ -802,7 +1136,7 @@ void Splice(const SubTrack* source, Interpolation interp, const std::vector<Tran
     std::vector<CurveKey<T>> keys;
     // The source's own keys, where the bake leaves the curve.
     for (const CurveKey<T>& key : src) {
-        if (!inside(key.time, dt - slop)) {
+        if (!inside(key.time, (staged ? 0.001f : dt) - slop)) {
             keys.push_back(key);
         }
     }
@@ -810,9 +1144,9 @@ void Splice(const SubTrack* source, Interpolation interp, const std::vector<Tran
     // whole millisecond, and split where the game reads it, which is keys at
     // whole milliseconds too.
     // @p before: the edge before its span, the source kept on its left.
-    const auto onSource = [&](u32 step, bool before) {
+    // @p step: the step nearest it, for a clip with no curve there.
+    const auto onSource = [&](u32 ms, u32 step, bool before) {
         CurveKey<T> key;
-        const u32 ms = Milliseconds(static_cast<f32>(step) * dt);
         key.time = static_cast<f32>(ms) / 1000.0f;
         if (src.size() >= 2 && key.time >= src.front().time && key.time <= src.back().time) {
             for (std::size_t i = 0; i + 1 < src.size(); ++i) {
@@ -847,12 +1181,38 @@ void Splice(const SubTrack* source, Interpolation interp, const std::vector<Tran
         key.in = key.out = FlatTangent(interp, key.value);
         return key;
     };
+    const auto keyed = [&](u32 ms) {
+        return std::any_of(keys.begin(), keys.end(), [&](const CurveKey<T>& k) { return Milliseconds(k.time) == ms; });
+    };
     for (const auto& [a, b] : spans) {
+        // The stretch is its edges' and the source keys' it leaves out.
+        const f32 margin = (staged ? 0.001f : dt) - slop;
+        const u32 first = Milliseconds(static_cast<f32>(a) * dt);
+        const u32 last = Milliseconds(static_cast<f32>(b) * dt);
+        const u32 before = staged ? (first > 0 ? first - 1 : 0) : Milliseconds(static_cast<f32>(a > 0 ? a - 1 : 0) * dt);
+        const u32 after = staged ? last + 1 : Milliseconds(static_cast<f32>(b + 1) * dt);
+        Stretch stretch{-kEver, static_cast<f32>(a) * dt, kEver};
         if (a > 0) {
-            keys.push_back(onSource(a - 1, true));
+            stretch.from = std::min(static_cast<f32>(before) / 1000.0f, stretch.first - margin) - kStretchPad;
         }
         if (b < steps) {
-            keys.push_back(onSource(b + 1, false));
+            stretch.to = std::max(static_cast<f32>(after) / 1000.0f, static_cast<f32>(b) * dt + margin) + kStretchPad;
+        }
+        own.push_back(stretch);
+        if (staged) {
+            if (a > 0 && first > 0 && !keyed(before)) {
+                keys.push_back(onSource(before, a, true));
+            }
+            if (b < steps && !keyed(after)) {
+                keys.push_back(onSource(after, b, false));
+            }
+            continue;
+        }
+        if (a > 0) {
+            keys.push_back(onSource(before, a - 1, true));
+        }
+        if (b < steps) {
+            keys.push_back(onSource(after, b + 1, false));
         }
     }
     // With no source track, the clip's ends hold what it played before.
@@ -867,11 +1227,19 @@ void Splice(const SubTrack* source, Interpolation interp, const std::vector<Tran
                 hold.value = animation[end];
                 hold.in = hold.out = FlatTangent(interp, hold.value);
                 keys.push_back(hold);
+                // The bake's own key too, with no simulation at it.
+                own.push_back(Stretch{hold.time - kStretchPad, hold.time - 1.0f, hold.time + kStretchPad});
             }
         }
     }
     for (const CurveKey<T>& key : keys) {
         kept.push_back(key.time);
+    }
+    if (staged) {
+        for (const auto& [a, b] : spans) {
+            kept.push_back(static_cast<f32>(a) * dt);
+            kept.push_back(static_cast<f32>(b) * dt);
+        }
     }
     // The samples, every stride-th step and each span's ends. The reduction
     // reads every key it is given at every key, so a minute of Decay keyed
@@ -947,9 +1315,24 @@ void Splice(const SubTrack* source, Interpolation interp, const std::vector<Tran
     // A smooth controller's tangents from the sampled slope.
     if (interp == Interpolation::Hermite || interp == Interpolation::Bezier) {
         for (std::size_t i = 0; i < sorted.size(); ++i) {
-            if (isBaked[i] != 0) {
-                SmoothTangents(interp, sorted, i);
+            if (isBaked[i] == 0) {
+                continue;
             }
+            if (!staged) {
+                SmoothTangents(interp, sorted, i);
+                continue;
+            }
+            std::size_t end = i;
+            while (end < sorted.size() && isBaked[end] != 0) {
+                ++end;
+            }
+            std::vector<CurveKey<T>> span(sorted.begin() + static_cast<std::ptrdiff_t>(i),
+                                          sorted.begin() + static_cast<std::ptrdiff_t>(end));
+            for (std::size_t k = 0; k < span.size(); ++k) {
+                SmoothTangents(interp, span, k);
+            }
+            std::copy(span.begin(), span.end(), sorted.begin() + static_cast<std::ptrdiff_t>(i));
+            i = end - 1;
         }
     }
     out.interp = interp;
@@ -1052,6 +1435,7 @@ BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesT
         w.node = run.nodes[n];
         w.samples.resize(steps + 1);
         w.active.assign(steps + 1, 0);
+        w.taken.assign(steps + 1, 0);
         const auto on = clothsOn.find(w.node);
         for (u32 i = 0; i <= steps; ++i) {
             const BodySwitch* switches = run.switchesAt(run.first + i);
@@ -1071,6 +1455,66 @@ BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesT
             w.samples[i] = w.active[i] != 0 ? recorded(n, static_cast<i32>(i)) : animation[i][w.node];
         }
         written.push_back(std::move(w));
+    }
+
+    // The nodes a constraint or IK stage drives. Their keys stand before the
+    // stage and the recording after it, so the two are never compared or
+    // blended: such a node is written where a body simulated it, where a
+    // stage it shares moved another of its nodes, or where the match moved it.
+    std::vector<const PoseStage*> constraints;
+    std::vector<u8> staged(owner.nodes.size(), 0);
+    for (const PoseStage& stage : owner.poseStages) {
+        if (!stage.enabled || IsPhysicsStage(stage.kind)) {
+            continue;
+        }
+        constraints.push_back(&stage);
+        for (const u32 node : stage.driven) {
+            if (node < staged.size()) {
+                staged[node] = 1;
+            }
+        }
+    }
+    std::map<u32, std::size_t> recordOf;
+    for (std::size_t n = 0; n < written.size(); ++n) {
+        recordOf[written[n].node] = n;
+    }
+    const auto owns = [](const Written& w, u32 i) { return w.active[i] != 0 || w.taken[i] != 0; };
+    // A stage moves its nodes together: where the bake has one, it takes them
+    // all, as recorded.
+    const auto together = [&] {
+        for (bool again = true; again;) {
+            again = false;
+            for (const PoseStage* stage : constraints) {
+                for (u32 i = 0; stage->driven.size() > 1 && i <= steps; ++i) {
+                    bool any = false;
+                    for (const u32 node : stage->driven) {
+                        const auto found = recordOf.find(node);
+                        any = any || (found != recordOf.end() && owns(written[found->second], i));
+                    }
+                    for (const u32 node : stage->driven) {
+                        const auto found = recordOf.find(node);
+                        if (any && found != recordOf.end() && !owns(written[found->second], i)) {
+                            written[found->second].taken[i] = 1;
+                            written[found->second].samples[i] = recorded(found->second, static_cast<i32>(i));
+                            again = true;
+                        }
+                    }
+                }
+            }
+        }
+    };
+    together();
+    const f32 height = std::max(ModelHeight(owner), 1.0f);
+    const f32 still = 1e-5f * height;
+    const auto departs = [&](const Transform& a, const Transform& b) {
+        return Angle(a.rotation, b.rotation) > 1e-3f || (a.translation - b.translation).length() > still;
+    };
+    // Only what the run moved in this clip is matched (§8.2).
+    std::vector<u8> simulates(written.size(), 0);
+    for (std::size_t n = 0; n < written.size(); ++n) {
+        for (u32 i = 0; i <= steps; ++i) {
+            simulates[n] = simulates[n] | static_cast<u8>(owns(written[n], i) ? 1 : 0);
+        }
     }
 
     // The seam before matching, then the match (§7.3, §7.4). A loop's seam
@@ -1111,8 +1555,30 @@ BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesT
             }
         }
         for (std::size_t n = 0; n < written.size(); ++n) {
-            MatchLoop(settings, steps, preheated, [&](i32 step) { return recorded(n, step); }, written[n].samples,
-                      report.offsetInstead);
+            Written& w = written[n];
+            if (simulates[n] == 0) {
+                continue;
+            }
+            const auto sample = [&](i32 step) { return recorded(n, step); };
+            if (staged[w.node] == 0) {
+                MatchLoop(settings, steps, preheated, sample, w.samples, report.offsetInstead);
+                continue;
+            }
+            // Matched as recorded, after its stage: a step the match moves is
+            // the bake's from then on.
+            std::vector<Transform> made(steps + 1);
+            for (u32 i = 0; i <= steps; ++i) {
+                made[i] = recorded(n, static_cast<i32>(i));
+            }
+            MatchLoop(settings, steps, preheated, sample, made, report.offsetInstead);
+            for (u32 i = 0; i <= steps; ++i) {
+                if (owns(w, i)) {
+                    w.samples[i] = made[i];
+                } else if (departs(recorded(n, static_cast<i32>(i)), made[i])) {
+                    w.taken[i] = 1;
+                    w.samples[i] = made[i];
+                }
+            }
         }
     } else if (target != kInvalidIndex && settings.match != LoopMatch::Off) {
         // The end crossfaded into what a looping target plays from its end
@@ -1121,20 +1587,37 @@ BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesT
         const u32 window =
             std::clamp<u32>(static_cast<u32>(std::lround(settings.window * static_cast<f32>(steps))), 1, steps);
         const Animator animator(document, model);
+        const StageRunner stages(document, model);
+        bool anyStaged = false;
+        for (std::size_t n = 0; n < written.size(); ++n) {
+            anyStaged = anyStaged || (simulates[n] != 0 && staged[written[n].node] != 0);
+        }
         for (u32 i = steps - window; i <= steps; ++i) {
             const f32 u = static_cast<f32>(i - (steps - window)) / static_cast<f32>(window);
             const f32 e = Ease(settings, u);
             const f32 there = intoLoop ? std::max(into.duration - static_cast<f32>(steps - i) * dt, 0.0f) : 0.0f;
-            // Its bake is its matched cycle; else its run; else its keys.
+            // Its bake is its matched cycle; else its run; else its keys, and
+            // for a constrained node what its stage makes of them.
             const bool intoBaked = into.physics.has_value() && into.physics->baked.has_value();
             const bool useRun = !intoBaked && goesTo != nullptr && goesTo->clip == target && goesTo->complete;
             Pose pose;
+            Pose played;
             if (!useRun) {
                 Mix mix;
                 mix.plays.push_back(Play{target, there, 1.0f, false});
                 animator.sample(mix, pose, true);
+                if (anyStaged) {
+                    animator.evaluate(mix, played);
+                    stages.constrain(animator, mix, played);
+                }
             }
-            for (Written& w : written) {
+            for (std::size_t n = 0; n < written.size(); ++n) {
+                Written& w = written[n];
+                if (simulates[n] == 0) {
+                    continue;
+                }
+                const bool after = staged[w.node] != 0;
+                const Pose& keys = after ? played : pose;
                 Transform partner;
                 if (useRun) {
                     const auto found = std::find(goesTo->nodes.begin(), goesTo->nodes.end(), w.node);
@@ -1142,15 +1625,25 @@ BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesT
                         continue;
                     }
                     partner = goesTo->localsAt(goesTo->stepAt(there))[found - goesTo->nodes.begin()];
-                } else if (w.node < pose.local.size()) {
-                    partner = pose.local[w.node];
+                } else if (w.node < keys.local.size()) {
+                    partner = keys.local[w.node];
                 } else {
                     continue;
                 }
-                w.samples[i] = Blended(w.samples[i], partner, e);
+                if (!after || owns(w, i)) {
+                    w.samples[i] = Blended(w.samples[i], partner, e);
+                    continue;
+                }
+                const Transform from = recorded(n, static_cast<i32>(i));
+                const Transform made = Blended(from, partner, e);
+                if (departs(from, made)) {
+                    w.taken[i] = 1;
+                    w.samples[i] = made;
+                }
             }
         }
     }
+    together();
 
     // Which nodes are written, and where: wherever the bake's samples leave
     // the clip's own animation, a body on them simulated or the match moved.
@@ -1168,8 +1661,6 @@ BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesT
     }
     std::vector<std::vector<std::pair<u32, SubTrack>>> replaced(clip.containers.size());
     std::vector<KeptKeys> keep;
-    const f32 height = std::max(ModelHeight(owner), 1.0f);
-    const f32 still = 1e-5f * height;
     // A hundredth of the accuracy's error: what thinning a still stretch may
     // add to it, unmeasured.
     const f32 noise = settings.tolerance * 0.01f;
@@ -1215,8 +1706,10 @@ BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesT
             appended.push_back(channel);
         }
     };
-    // Per node the bake writes, the steps it writes it at.
+    // Per node the bake writes, the steps it writes it at; and per channel it
+    // keys in stretches, those (`PhysicsBake::stretchTimes`).
     std::map<u32, std::vector<u8>> writes;
+    std::map<u32, std::vector<Stretch>> stretched;
     for (const Written& w : written) {
         if (global.count(w.node) != 0) {
             report.globalLoops.push_back(w.node);
@@ -1231,7 +1724,7 @@ BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesT
             const bool moved = (a.translation - b.translation).length() > still;
             turns = turns || turned;
             moves = moves || moved;
-            differs[i] = w.active[i] != 0 || turned || moved ? 1 : 0;
+            differs[i] = owns(w, i) || turned || moved ? 1 : 0;
         }
         if (!turns && !moves) {
             continue;
@@ -1306,14 +1799,14 @@ BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesT
                     anim[i] = animation[i][w.node].rotation;
                 }
                 Splice<Quaternion>(source != nullptr ? &original : nullptr, interp, w.samples, spans, dt, stride, noise,
-                                   height, anim, made, keptTimes);
+                                   height, anim, staged[w.node] != 0, made, keptTimes, stretched[channel]);
             } else {
                 std::vector<Vector3f> anim(steps + 1);
                 for (u32 i = 0; i <= steps; ++i) {
                     anim[i] = animation[i][w.node].translation;
                 }
                 Splice<Vector3f>(source != nullptr ? &original : nullptr, interp, w.samples, spans, dt, stride, noise,
-                                 height, anim, made, keptTimes);
+                                 height, anim, staged[w.node] != 0, made, keptTimes, stretched[channel]);
             }
             report.keys += static_cast<u32>(made.times.size());
             keep.push_back(KeptKeys{clipIndex, channel, std::move(keptTimes)});
@@ -1322,7 +1815,9 @@ BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesT
     }
     // A constraint or IK stage over a node the bake writes runs again over its
     // keys at play, and a Link carries them a second time: off wherever the
-    // bake writes one of its nodes, as it was everywhere else, stepped.
+    // bake writes one of its nodes, as it was everywhere else, stepped. On
+    // again a millisecond after the last key written, where `Splice` put the
+    // source's own.
     std::vector<u32> weights;
     for (const PoseStage& stage : owner.poseStages) {
         if (!stage.enabled || IsPhysicsStage(stage.kind) || stage.driven.empty()) {
@@ -1385,7 +1880,9 @@ BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesT
                 std::memcpy(&w, was.data() + i * sizeof(f32), sizeof(f32));
             }
             if (i == 0 || w != last) {
-                made.times.push_back(static_cast<f32>(i) * dt);
+                const bool resumes = i > 0 && off[i] == 0 && off[i - 1] != 0;
+                made.times.push_back(resumes ? static_cast<f32>(Milliseconds(static_cast<f32>(i - 1) * dt) + 1) / 1000.0f
+                                             : static_cast<f32>(i) * dt);
                 const u8* bytes = reinterpret_cast<const u8*>(&w);
                 made.values.insert(made.values.end(), bytes, bytes + sizeof(f32));
                 last = w;
@@ -1393,6 +1890,26 @@ BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesT
         }
         place(channel, std::move(made), home, source != nullptr);
         weights.push_back(channel);
+        // Off is the bake's, and the key that turns it on again.
+        std::vector<Stretch>& own = stretched[channel];
+        for (u32 i = 0; i <= steps; ++i) {
+            if (off[i] == 0) {
+                continue;
+            }
+            u32 b = i;
+            while (b < steps && off[b + 1] != 0) {
+                ++b;
+            }
+            Stretch stretch{static_cast<f32>(i) * dt - kStretchPad, static_cast<f32>(i) * dt, kEver};
+            if (i == 0) {
+                stretch.from = -kEver;
+            }
+            if (b < steps) {
+                stretch.to = static_cast<f32>(Milliseconds(static_cast<f32>(b) * dt) + 1) / 1000.0f + kStretchPad;
+            }
+            own.push_back(stretch);
+            i = b;
+        }
     }
     // A *Full detail* cloth's drivers (cloth design §10.3): each free
     // particle's frame relative to the cloth's holder, step by step, the
@@ -1600,13 +2117,16 @@ BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesT
                 SubTrack made;
                 made.channel = channel;
                 std::vector<f32> keptTimes;
+                // A lump's keys are the channel's whole: no stretch of it is kept.
+                std::vector<Stretch> whole;
+                stretched.erase(channel);
                 if (quat) {
                     std::vector<Quaternion> plays(steps + 1);
                     for (u32 i = 0; i <= steps; ++i) {
                         plays[i] = bone.plays[i].rotation;
                     }
                     Splice<Quaternion>(source != nullptr ? &original : nullptr, interp, bone.samples, spans, dt, stride,
-                                       softNoise, height, plays, made, keptTimes);
+                                       softNoise, height, plays, false, made, keptTimes, whole);
                 } else {
                     // `Splice` reads a translation: a scale goes through it as
                     // one, measured by what it moves a point a reach away.
@@ -1620,7 +2140,8 @@ BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesT
                         plays[i] = scale ? bone.plays[i].scale : bone.plays[i].translation;
                     }
                     Splice<Vector3f>(source != nullptr ? &original : nullptr, interp, samples, spans, dt, stride, softNoise,
-                                     scale ? height / std::max(bone.reach, 1e-6f) : height, plays, made, keptTimes);
+                                     scale ? height / std::max(bone.reach, 1e-6f) : height, plays, false, made, keptTimes,
+                                     whole);
                 }
                 keys += static_cast<u32>(made.times.size());
                 if (again) {
@@ -1715,7 +2236,22 @@ BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesT
         record.clothFits.push_back(line.fit);
         record.clothSizes.push_back(line.size);
     }
+    // Where it keyed each node's channel and each weight, and the clip's own
+    // keys beside them (§8.4).
+    for (const auto& [channel, stretches] : stretched) {
+        if (stretches.empty() ||
+            std::find(record.channels.begin(), record.channels.end(), channel) == record.channels.end()) {
+            continue;
+        }
+        record.stretchChannels.push_back(channel);
+        record.stretchCounts.push_back(static_cast<u32>(stretches.size()));
+        for (const Stretch& stretch : stretches) {
+            record.stretchTimes.insert(record.stretchTimes.end(), {stretch.from, stretch.first, stretch.to});
+        }
+        record.stretchOutside.push_back(OutsideHash(document.clips[clipIndex], channel, stretches));
+    }
     record.written = WrittenHash(document.clips[clipIndex], record);
+    record.stretchInside = InsideHash(document.clips[clipIndex], record);
     Clip& out = document.clips[clipIndex];
     // Settings added here only hold the record: the clip is no more set up
     // than it was, and an Unbake takes them with it.
@@ -1838,7 +2374,146 @@ bool BakedKeysEdited(const Document& document, u32 clip) {
         return false;
     }
     const PhysicsBake& record = *document.clips[clip].physics->baked;
+    // Its own keys, where the record tells them from the clip's.
+    if (record.stretchInside != 0) {
+        return InsideHash(document.clips[clip], record) != record.stretchInside;
+    }
     return WrittenHash(document.clips[clip], record) != record.written;
+}
+
+void StampBakeWritten(Document& document, u32 clip) {
+    if (clip >= document.clips.size() || !document.clips[clip].physics || !document.clips[clip].physics->baked) {
+        return;
+    }
+    PhysicsBake& record = *document.clips[clip].physics->baked;
+    record.written = WrittenHash(document.clips[clip], record);
+    if (record.stretchInside != 0) {
+        record.stretchInside = InsideHash(document.clips[clip], record);
+    }
+}
+
+namespace {
+
+/// The stretches an older bake keyed on a node's channel, read off @p now's
+/// keys: a key @p source does not hold is the bake's, with every key between
+/// two of them, and a source key it left out is in the stretch nearest it.
+template <class T>
+std::vector<Stretch> ReadStretches(const SubTrack& now, const SubTrack* source, f32 duration) {
+    const std::vector<CurveKey<T>> ours = DecodeKeys<T>(now);
+    const std::vector<CurveKey<T>> theirs = source != nullptr ? DecodeKeys<T>(*source) : std::vector<CurveKey<T>>{};
+    const auto held = [&](const CurveKey<T>& key) {
+        return std::any_of(theirs.begin(), theirs.end(), [&](const CurveKey<T>& other) {
+            return other.time == key.time && std::memcmp(&other.value, &key.value, sizeof(T)) == 0;
+        });
+    };
+    std::vector<Stretch> out;
+    for (std::size_t i = 0; i < ours.size(); ++i) {
+        if (held(ours[i])) {
+            continue;
+        }
+        std::size_t last = i;
+        while (last + 1 < ours.size() && !held(ours[last + 1])) {
+            ++last;
+        }
+        Stretch stretch;
+        stretch.from = i == 0 ? -kEver : ours[i].time - kStretchPad;
+        stretch.to = last + 1 == ours.size() && ours[last].time >= duration - 0.001f ? kEver
+                                                                                     : ours[last].time + kStretchPad;
+        // An edge key leads the simulation's, where the clip's own go on before it.
+        stretch.first = last == i ? stretch.from - 1.0f : ours[i == 0 ? i : i + 1].time;
+        out.push_back(stretch);
+        i = last;
+    }
+    for (const CurveKey<T>& key : theirs) {
+        if (out.empty() || Within(out, key.time) ||
+            std::any_of(ours.begin(), ours.end(), [&](const CurveKey<T>& other) { return other.time == key.time; })) {
+            continue;
+        }
+        Stretch* nearest = &out.front();
+        const auto apart = [&](const Stretch& s) { return std::max(s.from - key.time, key.time - s.to); };
+        for (Stretch& s : out) {
+            if (apart(s) < apart(*nearest)) {
+                nearest = &s;
+            }
+        }
+        nearest->from = std::min(nearest->from, key.time - kStretchPad);
+        nearest->to = std::max(nearest->to, key.time + kStretchPad);
+    }
+    return out;
+}
+
+} // namespace
+
+void MarkBakeStretches(Document& document) {
+    std::vector<Stretch> stretches;
+    for (Clip& clip : document.clips) {
+        if (!clip.physics.has_value() || !clip.physics->baked.has_value() || clip.model >= document.models.size()) {
+            continue;
+        }
+        PhysicsBake& record = *clip.physics->baked;
+        if (record.stretchInside != 0) {
+            continue;
+        }
+        // Keys edited since cannot be told from the bake's, channel by channel.
+        const bool edited = WrittenHash(clip, record) != record.written;
+        const AnimChannelTable& table = document.models[clip.model].animChannels;
+        for (const u32 channel : record.channels) {
+            const AnimChannel* declared = table.find(channel);
+            if (declared == nullptr || declared->target.kind != TrackTarget::Kind::Node ||
+                std::find(record.softChannels.begin(), record.softChannels.end(), channel) != record.softChannels.end() ||
+                StretchesOf(record, channel, stretches).has_value()) {
+                continue;
+            }
+            const bool turns =
+                declared->target.channel == Channel::Rotation && declared->valueType == geom::AttrType::Quat;
+            const bool moves =
+                declared->target.channel == Channel::Translation && declared->valueType == geom::AttrType::F32x3;
+            // One layer's keys, as `OwnAnimations` puts them back.
+            const SubTrack* now = nullptr;
+            const SubTrack* source = nullptr;
+            u32 layers = 0;
+            for (const SubTrackContainer& container : clip.containers) {
+                if (const SubTrack* found = container.find(channel); found != nullptr && now == nullptr) {
+                    now = found;
+                }
+            }
+            for (const SubTrackContainer& container : record.source) {
+                if (const SubTrack* found = container.find(channel); found != nullptr) {
+                    source = found;
+                    ++layers;
+                }
+            }
+            // Every key of it taken away since: the bake's are gone, and what
+            // it replaced is not put back under them. The track is the clip's
+            // own from here on, with no stretch.
+            const bool gone = edited && (now == nullptr || now->times.empty());
+            if ((!turns && !moves) || layers > 1 || (!gone && (now == nullptr || now->times.empty())) ||
+                (!gone && !now->wellSized(declared->valueType)) ||
+                (source != nullptr && !source->wellSized(declared->valueType))) {
+                continue;
+            }
+            stretches.clear();
+            if (!gone) {
+                stretches = turns ? ReadStretches<Quaternion>(*now, source, clip.duration)
+                                  : ReadStretches<Vector3f>(*now, source, clip.duration);
+                if (stretches.empty()) {
+                    continue;
+                }
+            }
+            record.stretchChannels.push_back(channel);
+            record.stretchCounts.push_back(static_cast<u32>(stretches.size()));
+            for (const Stretch& stretch : stretches) {
+                record.stretchTimes.insert(record.stretchTimes.end(), {stretch.from, stretch.first, stretch.to});
+            }
+            // 0 is no track's keys: one with no stretch is never as the bake left it.
+            record.stretchOutside.push_back(gone ? 0 : OutsideHash(clip, channel, stretches));
+        }
+        record.stretchInside = InsideHash(clip, record);
+        // Edited before it was read: it goes on reading so.
+        if (edited) {
+            record.stretchInside = ~record.stretchInside != 0 ? ~record.stretchInside : 1;
+        }
+    }
 }
 
 u32 BakeForExport(Document& document, const BakeHooks& hooks, std::span<const std::shared_ptr<const BakeRun>> runs,

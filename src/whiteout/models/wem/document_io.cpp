@@ -6,6 +6,7 @@
 
 #include <whiteout/models/wem/geometry/ops.h>
 #include <whiteout/models/wem/meshes/remove.h>
+#include <whiteout/models/wem/physics/bake.h>
 
 #include "../../common/binary_reader.h"
 #include "../../common/binary_writer.h"
@@ -168,6 +169,7 @@ public:
         }
         KeyLegacySets(document);
         DropLevelsOfDetail(document, diagnostics);
+        MarkBakeStretches(document);
         return document;
     }
 };

@@ -482,6 +482,96 @@ TEST_CASE("wem a Link reads its source as the Links before it leave it", "[wem][
     CHECK((OriginOf(later[loose]) - OriginOf(Frames(rig.document, 1.4f, false)[loose])).length() > 1.0f);
 }
 
+TEST_CASE("wem a constraint reads a held node where it is held, and leaves a held node alone",
+          "[wem][anim][stages]") {
+    Rig rig;
+    // The tip rides the target by a Link that is on.
+    PoseStage& link = rig.stage(StageKind::Link, {rig.tip}, {rig.target});
+    link.sources[0].weight = 1.0f;
+    const Animator animator(rig.document, 0);
+    const StageRunner runner(rig.document, 0);
+    Mix mix;
+    mix.plays.push_back(Play{0, 0.6f, 1.0f, true});
+    Pose keys;
+    animator.evaluate(mix, keys);
+    Pose plain = keys;
+    runner.constrain(animator, mix, plain);
+    // Something else stands the target 20 units along x: the tip goes with it.
+    Matrix44f moved = plain.frame[rig.target];
+    moved.data[3][0] += 20.0f;
+    const StageHold held[] = {StageHold{rig.target, moved}};
+    Pose read = keys;
+    runner.constrain(animator, mix, read, StageHolds{held, nullptr});
+    CHECK(Worst(read.frame[rig.target], moved) < 1e-3f);
+    CHECK((OriginOf(read.frame[rig.tip]) - OriginOf(plain.frame[rig.tip]) - Vector3f{20, 0, 0}).length() < 1e-3f);
+    // A held tip is its holder's: the Link does not carry it.
+    Matrix44f stood = keys.frame[rig.tip];
+    stood.data[3][2] += 7.0f;
+    const StageHold own[] = {StageHold{rig.tip, stood}};
+    Pose kept = keys;
+    runner.constrain(animator, mix, kept, StageHolds{own, nullptr});
+    CHECK(Worst(kept.frame[rig.tip], stood) < 1e-3f);
+}
+
+TEST_CASE("wem the stages around a step read what the step wrote", "[wem][anim][stages]") {
+    Rig rig;
+    PoseStage& link = rig.stage(StageKind::Link, {rig.tip}, {rig.target});
+    link.sources[0].weight = 1.0f;
+    const Animator animator(rig.document, 0);
+    const StageRunner runner(rig.document, 0);
+    const NodeTree& tree = rig.document.models[0].nodes;
+    SimulatedSteps steps;
+    SimulatedStages around(rig.document, 0, steps);
+    REQUIRE_FALSE(around.empty());
+    // A simulation that takes the target and drops it further every step.
+    std::vector<u8> simulated(tree.size(), 0);
+    simulated[rig.target] = 1;
+    Matrix44f left = Matrix44f::identity();
+    for (u32 k = 0; k < 4; ++k) {
+        INFO("step " << k);
+        const f32 seconds = static_cast<f32>(k) / 60.0f;
+        Mix mix;
+        mix.plays.push_back(Play{0, seconds, 1.0f, true});
+        mix.worldSeconds = seconds;
+        Pose pose;
+        animator.evaluate(mix, pose);
+        Pose plain = pose;
+        runner.constrain(animator, mix, plain);
+        // The tip as the Link carries it by a target standing at a frame.
+        const auto carried = [&](const Matrix44f& target) {
+            return plain.frame[rig.tip] * Matrix44f::inverse(plain.frame[rig.target]) * target;
+        };
+        around.before(animator, mix, seconds, pose, simulated);
+        // The step runs on the animation's target, and on the tip standing by
+        // where the last step left it.
+        CHECK(Worst(pose.frame[rig.target], plain.frame[rig.target]) < 1e-3f);
+        CHECK(Worst(pose.frame[rig.tip], k == 0 ? plain.frame[rig.tip] : carried(left)) < 1e-3f);
+        Matrix44f dropped = plain.frame[rig.target];
+        dropped.data[3][2] -= 5.0f * static_cast<f32>(k + 1);
+        const Transform local = StageLocalFor(tree, pose, rig.target, dropped);
+        pose.local[rig.target].translation = local.translation;
+        pose.local[rig.target].rotation = local.rotation;
+        animator.compose(pose);
+        around.after(animator, mix, seconds, pose, simulated);
+        // What it leaves: the target where it wrote it, the tip by it there.
+        CHECK(Worst(pose.frame[rig.target], dropped) < 1e-3f);
+        CHECK(Worst(pose.frame[rig.tip], carried(dropped)) < 1e-3f);
+        left = dropped;
+    }
+}
+
+TEST_CASE("wem a Link switches at the millisecond its key is read", "[wem][anim][stages]") {
+    Rig rig;
+    PoseStage& link = rig.stage(StageKind::Link, {rig.tip}, {rig.target});
+    link.sources[0].weight = 1.0f;
+    // Off the target at 0.517 s. A sample at 31/60 s reads that key, the tracks
+    // being read by the millisecond, so the Link has switched there too.
+    rig.key(link, 1, {0.0f, 0.517f}, {1.0f, 0.0f});
+    const Vector3f before = OriginOf(Frames(rig.document, 0.516f, true)[rig.tip]);
+    CHECK((before - OriginOf(Frames(rig.document, 0.516f, false)[rig.tip])).length() > 3.0f);
+    CHECK((OriginOf(Frames(rig.document, 31.0f / 60.0f, true)[rig.tip]) - before).length() < 0.5f);
+}
+
 TEST_CASE("wem a stage's weight is a node channel no exporter writes", "[wem][anim][stages]") {
     Rig rig;
     rig.stage(StageKind::LookAt, {rig.head}, {rig.target});

@@ -18,6 +18,7 @@
 
 #include <functional>
 #include <map>
+#include <span>
 #include <vector>
 
 #include <whiteout/common_types.h>
@@ -75,6 +76,22 @@ Transform StageLocalFor(const NodeTree& tree, const Pose& pose, u32 node, const 
 /// where the node already is. Any other kind's is the identity.
 void CaptureStageOffset(const Document& document, u32 model, PoseStage& stage);
 
+/// A node something other than the stages stands: a simulation's body, where
+/// its step left it, in model space.
+struct StageHold {
+    u32 node = kInvalidNode;
+    Matrix44f frame = Matrix44f::identity();
+};
+
+/// What is held on a pose the constraints run on: at the pose's own moment,
+/// and at an earlier one of the same play, where a Link reads its switches.
+struct StageHolds {
+    std::span<const StageHold> now;
+    /// The nodes held @p secondsAgo, where they stood then. Unset: none, and
+    /// an earlier switch reads the animation alone.
+    std::function<std::span<const StageHold>(f32 secondsAgo)> earlier;
+};
+
 /**
  * @brief Runs one model's stages on a pose, in the list's order.
  *
@@ -100,6 +117,11 @@ public:
     /// The constraint and IK stages alone, which keep no state: what a pose
     /// read anywhere in the editor gets. A Link reads its switches from @p mix.
     void constrain(const Animator& animator, const Mix& mix, Pose& pose) const;
+
+    /// The same with @p held's nodes standing at their frames: every stage
+    /// reads them there, and one whose driven nodes are all held is left to
+    /// what holds them.
+    void constrain(const Animator& animator, const Mix& mix, Pose& pose, const StageHolds& held) const;
 
     /// Drops every physics state and snapshot: a clip change, a loop restart,
     /// an undo.
@@ -131,9 +153,14 @@ private:
 
     void constrainOne(const Animator& animator, const Mix& mix, Pose& pose, const PoseStage& stage,
                       LinkPass& pass) const;
+    /// `constrainOne` on a pose where @p held's nodes, parents first, are held.
+    void constrainHeld(const Animator& animator, const Mix& mix, Pose& pose, const PoseStage& stage, LinkPass& pass,
+                       std::span<const StageHold> held) const;
     /// @p stage, a Link, read in the pose the constraint and IK stages before
-    /// it leave at @p mix; at rest where it is null.
-    LinkReading linkReading(const Animator& animator, const Mix* mix, const PoseStage& stage, LinkPass& pass) const;
+    /// it leave at @p mix, @p ago seconds before the pass's own; at rest where
+    /// it is null.
+    LinkReading linkReading(const Animator& animator, const Mix* mix, const PoseStage& stage, LinkPass& pass,
+                            f32 ago = 0.0f) const;
     /// Where @p mix's switches have left a Link: every key of its sources'
     /// Enabled replayed from the clip's start, the offsets rebased wherever the
     /// shares change, so the node keeps its place.
@@ -149,6 +176,67 @@ private:
     i64 steps_ = 0;
     bool started_ = false;
     std::map<i64, State> snapshots_;
+};
+
+/// What `SimulatedStages` keeps of a run from step to step. A run that
+/// outlives an edit holds this and makes the stages again.
+struct SimulatedSteps {
+    /// What each step wrote, by its time: where a Link's earlier switch reads.
+    std::vector<f32> times;
+    std::vector<std::vector<StageHold>> held;
+    /// The mix's own keys at the step `before` saw, the pose a pass reads the
+    /// simulation on, and whether `before` moved a node by it.
+    Pose tracks;
+    Pose read;
+    bool led = false;
+
+    void clear() {
+        times.clear();
+        held.clear();
+        led = false;
+    }
+};
+
+/**
+ * @brief The constraint and IK stages around a simulation's steps (a bake's
+ *        run, the Physics Test): they read the nodes it moves where it left
+ *        them, never where the animation has them.
+ *
+ * `before` gives the pose a step runs on: the animation's, as `constrain`
+ * leaves it, with each constrained node the simulation does not move standing
+ * where the last step's bodies put what it reads. `after` gives the pose the
+ * step leaves: its nodes where it wrote them, and every constraint over the
+ * others run again on that, which is what a bake's keys play.
+ */
+class SimulatedStages {
+public:
+    SimulatedStages(const Document& document, u32 model, SimulatedSteps& steps);
+
+    /// No constraint or IK stage is enabled: both calls leave the pose alone.
+    bool empty() const {
+        return driven_.empty();
+    }
+
+    /// @p pose is @p mix's, sampled and composed, at @p seconds of the run.
+    /// @p simulated says, by node, whether the step about to run still moves
+    /// it; a node being handed back to its animation is not one.
+    void before(const Animator& animator, const Mix& mix, f32 seconds, Pose& pose, std::span<const u8> simulated);
+
+    /// @p pose is `before`'s once the step wrote its nodes, @p written by node.
+    void after(const Animator& animator, const Mix& mix, f32 seconds, Pose& pose, std::span<const u8> written);
+
+private:
+    StageHolds holds(f32 seconds, std::span<const StageHold> now) const;
+
+    StageRunner stages_;
+    const Model* model_ = nullptr;
+    SimulatedSteps& steps_;
+    /// The nodes a constraint or IK stage drives, parents first, and the force
+    /// fields, which ride their animation whatever the bodies do.
+    std::vector<u32> driven_;
+    std::vector<u32> fields_;
+    /// How long a step is kept: as far back as a Link can read.
+    f32 keep_ = 0.0f;
 };
 
 /// Bakes @p document for an export to @p target: every clip's stages written

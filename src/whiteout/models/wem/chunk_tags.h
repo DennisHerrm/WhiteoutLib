@@ -510,10 +510,11 @@ struct ChunkTagTraits<ClipEvent> {
 /// v5 `Clip::physics`, the physics bake's settings (EDIT_MODE_PHYSICS_BAKE_DESIGN.md §9.2).
 /// v6 `PhysicsBake`'s cloths (EDIT_MODE_PHYSICS_CLOTH_DESIGN.md §10.2).
 /// v7 `PhysicsBake`'s soft bodies (EDIT_MODE_SOFTBODY_DESIGN.md §11.2).
+/// v8 `PhysicsBake`'s stretches: where it keyed, so the clip's own keys stay (§8.4).
 template <>
 struct ChunkTagTraits<Clip> {
     static constexpr u32 value = kTag("CLIP");
-    static constexpr u32 max_version = 7;
+    static constexpr u32 max_version = 8;
     static constexpr bool is_trivial = false;
 };
 

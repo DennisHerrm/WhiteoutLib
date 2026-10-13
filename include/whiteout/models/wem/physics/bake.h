@@ -79,9 +79,10 @@ struct BakeHooks {
     /// where its pose stands, once for every clip: @p movable is every body
     /// that can move in any clip, by body index (§6).
     std::function<void(const Document& document, u32 model, std::span<const u8> movable)> reset;
-    /// One step on @p pose, which the run sampled and composed: the bodies
-    /// the step's switches hand the simulation are written back into its
-    /// `local`s, T and R, and its frames composed again.
+    /// One step on @p pose, which the run sampled, constrained and composed:
+    /// the bodies the step's switches hand the simulation are written back
+    /// into its `local`s, T and R, and its frames composed again. The run then
+    /// has every constraint read them there (`SimulatedStages`).
     std::function<void(const Document& document, u32 model, const BakeStep& step, Pose& pose)> step;
     /// The cloths stepped on @p pose, after `step` wrote the bodies back, so a
     /// cape follows its ragdoll; built where the first pose stands after a
@@ -98,7 +99,8 @@ struct BakeRun {
     f32 dt = 1.0f / 60.0f; ///< The clip's length over a whole number of steps.
     u32 first = 0;         ///< The step at the clip's frame 0.
     u32 steps = 0;         ///< Steps over the clip: its frame 0 to its end, `steps + 1` recorded.
-    /// The nodes recorded, ascending: every node a body that can move sits on.
+    /// The nodes recorded, ascending: every node a body that can move sits
+    /// on, and every node a constraint or IK stage drives.
     std::vector<u32> nodes;
     /// Per recorded step, each recorded node's local T and R (its scale the
     /// animation's), and each body's state.
@@ -264,7 +266,9 @@ struct BakeReport {
  * A clip baked before is restored to its source first. A clip on its MDX
  * window is detached. A constraint or IK stage over a node it writes has its
  * weight keyed off there, so the clip plays the recording and not the stage
- * run over it again. @p goesTo, the run of a once-played clip's *Goes to*,
+ * run over it again; its other nodes are written with it. A constrained node
+ * the run does not move is left to its stage, which reads the baked keys of
+ * what it follows. @p goesTo, the run of a once-played clip's *Goes to*,
  * is what its end is cross-faded into; without it, the target's keys as they
  * stand.
  */
@@ -276,7 +280,9 @@ BakeReport BakeClip(Document& document, const BakeRun& run, const BakeRun* goesT
 u32 BakeStepsOf(const Document& document, u32 clip, f32& dt);
 
 /// Puts back what @p clip's bake replaced, and drops the channels it declared
-/// that nothing keys any more (§8.4). Nothing for a clip not baked. An editor
+/// that nothing keys any more (§8.4). A key set or changed since outside the
+/// stretches the bake keyed is the clip's own and stays, here and in every
+/// read of the source. Nothing for a clip not baked. An editor
 /// that journals the clips alone keeps them (@p dropChannels false): an
 /// unkeyed channel plays nothing.
 void UnbakeClip(Document& document, u32 clip, bool dropChannels = true);
@@ -306,6 +312,17 @@ bool BakedKeysEdited(const Document& document, u32 clip);
 /// stand: what `PhysicsBake::written` is compared with. 0 for a clip not
 /// baked. For an edit that changes what a bake wrote and stands by it.
 u64 BakeWrittenNow(const Document& document, u32 clip);
+/// @p clip's record stamped with what its bake wrote as it now stands
+/// (`PhysicsBake::written` and `stretchInside`): for an edit that changes
+/// what a bake wrote and stands by it.
+void StampBakeWritten(Document& document, u32 clip);
+/// Gives each bake record made before the stretches were kept
+/// (`PhysicsBake::stretchChannels`) those of its nodes' channels, read off the
+/// keys, so a key set beside them afterwards stays (§8.4). In a record whose
+/// keys were edited before: a channel left with no key has no stretch, and
+/// what the bake replaced on it is not put back; a key edited on any other
+/// reads as the bake's. What a read of a `.wem` runs.
+void MarkBakeStretches(Document& document);
 
 /**
  * @brief The export's bake (§8.6): every set-up clip not baked yet, in

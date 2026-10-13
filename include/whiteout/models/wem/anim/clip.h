@@ -383,6 +383,20 @@ struct PhysicsBake {
     /// The bake added the clip's settings to hold this record: the clip was not
     /// set up (`IsSetUp`), and an Unbake leaves it so.
     bool madeSettings = false;
+    /// Where the bake keyed a node's own channels and a stage's weight (§8.4):
+    /// for each of `stretchChannels`, `stretchCounts` stretches of the clip,
+    /// each three of `stretchTimes`: where its keys begin, where the simulation
+    /// takes over, where they end. A key outside them is the clip's own
+    /// animation, which a Rebake and an Unbake keep as it stands.
+    /// `stretchOutside` is each channel's such keys as the bake left them,
+    /// hashed (0 for a channel listed with no stretch: its keys were taken
+    /// away, and the track is the clip's own), and `stretchInside` what it
+    /// wrote, hashed: 0 in a record made before the stretches were kept.
+    std::vector<u32> stretchChannels;
+    std::vector<u32> stretchCounts;
+    std::vector<f32> stretchTimes;
+    std::vector<u64> stretchOutside;
+    u64 stretchInside = 0;
 
     template <class V>
     void reflect(V& v) {
@@ -412,6 +426,11 @@ struct PhysicsBake {
         v.since(7).field("softChannels", softChannels);
         v.since(7).field("softSource", softSource);
         v.since(7).field("madeSettings", madeSettings);
+        v.since(8).field("stretchChannels", stretchChannels);
+        v.since(8).field("stretchCounts", stretchCounts);
+        v.since(8).field("stretchTimes", stretchTimes);
+        v.since(8).field("stretchOutside", stretchOutside);
+        v.since(8).field("stretchInside", stretchInside);
     }
 };
 

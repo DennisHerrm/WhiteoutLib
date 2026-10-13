@@ -427,6 +427,11 @@ TEST_CASE("a clip's bake settings and record survive a .wem", "[physics][bake][i
     baked.appended = {9, 10};
     baked.inputs = 0x1234567890ull;
     baked.settling = {18.4f, 3.1f};
+    baked.stretchChannels = {7};
+    baked.stretchCounts = {1};
+    baked.stretchTimes = {0.25f, 0.3f, 0.9f};
+    baked.stretchOutside = {0x9876543210ull};
+    baked.stretchInside = 0x1122334455ull;
     const std::vector<u8> bytes = Writer().write(rig.document);
     const std::optional<Document> read = Parser().parse(std::span<const u8>(bytes.data(), bytes.size()));
     REQUIRE(read.has_value());
@@ -958,6 +963,262 @@ TEST_CASE("a Rebake of what a clip goes to makes it out of date", "[physics][bak
     CHECK(BakeInputs(rig.document, 1) == attack);
     REQUIRE(BakeClip(rig.document, SimulateClip(rig.document, 0, swing.Hooks())).ok);
     CHECK(BakeInputs(rig.document, 1) != attack);
+}
+
+namespace {
+
+/// @p clip's track of @p channel, to key by hand as Animations does.
+SubTrack* Keys(Clip& clip, u32 channel) {
+    for (SubTrack& track : clip.containers.front().subTracks) {
+        if (track.channel == channel) {
+            return &track;
+        }
+    }
+    return nullptr;
+}
+
+/// A Death whose ragdoll drops at 0.3 s, baked with a key every step. Of the
+/// tail's own keys, those at 0 and 0.25 s stand before the drop, and those at
+/// 0.75 and 1 s are under what the bake keyed.
+Rig BakedDeath(Swing& swing) {
+    Rig rig = Tailed({"Death"});
+    rig.model().physics.bodies[1].motion = BodyMotion::Kinematic;
+    rig.document.clips[0].looping = false;
+    rig.key(0, rig.rig, Channel::PhysicsRagdoll, {0.0f, 0.3f}, {0.0f, 1.0f});
+    rig.document.clips[0].physics.emplace().tolerance = 0.0f;
+    REQUIRE(BakeClip(rig.document, SimulateClip(rig.document, 0, swing.Hooks())).ok);
+    return rig;
+}
+
+/// @p record as a build before the stretches wrote it.
+void ForgetStretches(PhysicsBake& record) {
+    record.stretchChannels.clear();
+    record.stretchCounts.clear();
+    record.stretchTimes.clear();
+    record.stretchOutside.clear();
+    record.stretchInside = 0;
+}
+
+} // namespace
+
+TEST_CASE("a key set beside a bake's keys stays through a Rebake and an Unbake", "[physics][bake][record]") {
+    Swing swing;
+    Rig rig = BakedDeath(swing);
+    const u32 tail = RotationChannel(rig, 1);
+    Document source = rig.document;
+    UnbakeClip(source, 0);
+    CHECK(BakeInDate(rig.document, 0));
+    CHECK_FALSE(BakedKeysEdited(rig.document, 0));
+    // In Animations, on the baked clip: the tail's first key turned.
+    const Quaternion turned = Quaternion::from_axis_angle(Vector3f{0, 1, 0}, 0.5f);
+    SubTrack* keys = Keys(rig.document.clips[0], tail);
+    REQUIRE(keys != nullptr);
+    REQUIRE(keys->times.front() == 0.0f);
+    std::memcpy(keys->values.data(), &turned, sizeof turned);
+    // The clip's own key and none of the bake's: nothing baked was edited,
+    // and the bake no longer holds what the clip plays into it.
+    CHECK_FALSE(BakedKeysEdited(rig.document, 0));
+    CHECK_FALSE(BakeInDate(rig.document, 0));
+    // Baked again it is as it was set, and the key after it the source's.
+    REQUIRE(BakeClip(rig.document, SimulateClip(rig.document, 0, swing.Hooks())).ok);
+    CHECK(BakeInDate(rig.document, 0));
+    const SubTrack* now = TrackOf(rig.document.clips[0], rig.model(), 1, Channel::Rotation);
+    REQUIRE(now != nullptr);
+    CHECK(std::memcmp(now->values.data(), &turned, sizeof turned) == 0);
+    CHECK(Degrees(RotationAt(rig.document, 0, 1, 0.25f), RotationAt(source, 0, 1, 0.25f)) < 1e-3f);
+    // Unbaked: the source with that key, every other as it had it.
+    UnbakeClip(rig.document, 0);
+    const SubTrack* back = TrackOf(rig.document.clips[0], rig.model(), 1, Channel::Rotation);
+    const SubTrack* was = TrackOf(source.clips[0], source.models[0], 1, Channel::Rotation);
+    REQUIRE(back != nullptr);
+    REQUIRE(was != nullptr);
+    REQUIRE(back->times == was->times);
+    CHECK(std::memcmp(back->values.data(), &turned, sizeof turned) == 0);
+    CHECK(std::memcmp(back->values.data() + sizeof turned, was->values.data() + sizeof turned,
+                      was->values.size() - sizeof turned) == 0);
+    // The root's keys, which no one touched, to the byte.
+    const SubTrack* root = TrackOf(rig.document.clips[0], rig.model(), 0, Channel::Rotation);
+    const SubTrack* rootWas = TrackOf(source.clips[0], source.models[0], 0, Channel::Rotation);
+    REQUIRE(root != nullptr);
+    REQUIRE(rootWas != nullptr);
+    CHECK(ReflectBytes(*root) == ReflectBytes(*rootWas));
+}
+
+TEST_CASE("a key changed where the animation leaves for the simulation holds to it", "[physics][bake][record]") {
+    Swing swing;
+    Rig rig = BakedDeath(swing);
+    const u32 tail = RotationChannel(rig, 1);
+    // The tail's last key before the drop, at 0.25 s, turned by hand. Under
+    // the bake's keys the source goes on to its key at 0.75 s, which the
+    // baked clip does not show.
+    const Quaternion turned = Quaternion::from_axis_angle(Vector3f{0, 1, 0}, 0.5f);
+    SubTrack* keys = Keys(rig.document.clips[0], tail);
+    REQUIRE(keys != nullptr);
+    REQUIRE(keys->times.size() > 2);
+    REQUIRE(keys->times[1] == 0.25f);
+    std::memcpy(keys->values.data() + sizeof turned, &turned, sizeof turned);
+    REQUIRE(BakeClip(rig.document, SimulateClip(rig.document, 0, swing.Hooks())).ok);
+    for (f32 t = 0.25f; t < 0.28f; t += 0.005f) {
+        CHECK(Degrees(RotationAt(rig.document, 0, 1, t), turned) < 0.05f);
+    }
+    // The source holds it to the drop, and has what it had from there on.
+    UnbakeClip(rig.document, 0);
+    const SubTrack* back = TrackOf(rig.document.clips[0], rig.model(), 1, Channel::Rotation);
+    REQUIRE(back != nullptr);
+    REQUIRE(back->times.size() == 5u);
+    CHECK(back->times[2] == Approx(0.3f));
+    CHECK(std::memcmp(back->values.data() + 2 * sizeof turned, &turned, sizeof turned) == 0);
+    CHECK(back->times[3] == 0.75f);
+    // An earlier key changed leaves the way into the simulation as it was.
+    Rig other = BakedDeath(swing);
+    SubTrack* first = Keys(other.document.clips[0], RotationChannel(other, 1));
+    REQUIRE(first != nullptr);
+    std::memcpy(first->values.data(), &turned, sizeof turned);
+    UnbakeClip(other.document, 0);
+    CHECK(TrackOf(other.document.clips[0], other.model(), 1, Channel::Rotation)->times.size() == 4u);
+}
+
+TEST_CASE("a bake's keys taken away by hand leave nothing to put back under them", "[physics][bake][record]") {
+    Swing swing;
+    Rig rig = BakedDeath(swing);
+    // Every key of the tail erased, and one set at the start.
+    const Quaternion turned = Quaternion::from_axis_angle(Vector3f{0, 1, 0}, 0.5f);
+    SubTrack* keys = Keys(rig.document.clips[0], RotationChannel(rig, 1));
+    REQUIRE(keys != nullptr);
+    keys->times = {0.0f};
+    keys->values.resize(sizeof turned);
+    std::memcpy(keys->values.data(), &turned, sizeof turned);
+    UnbakeClip(rig.document, 0);
+    const SubTrack* back = TrackOf(rig.document.clips[0], rig.model(), 1, Channel::Rotation);
+    REQUIRE(back != nullptr);
+    REQUIRE(back->times == std::vector<f32>{0.0f});
+    CHECK(std::memcmp(back->values.data(), &turned, sizeof turned) == 0);
+    // Only what the bake keyed erased, the keys before the drop as they were: the same.
+    Rig other = BakedDeath(swing);
+    SubTrack* rest = Keys(other.document.clips[0], RotationChannel(other, 1));
+    REQUIRE(rest != nullptr);
+    REQUIRE(rest->times.size() > 2);
+    REQUIRE(rest->times[1] == 0.25f);
+    rest->times.resize(2);
+    rest->values.resize(2 * sizeof turned);
+    UnbakeClip(other.document, 0);
+    const SubTrack* kept = TrackOf(other.document.clips[0], other.model(), 1, Channel::Rotation);
+    REQUIRE(kept != nullptr);
+    CHECK(kept->times == std::vector<f32>{0.0f, 0.25f});
+}
+
+TEST_CASE("an older record's bone with its keys taken away is keyed from nothing", "[physics][bake][record][io]") {
+    Swing swing;
+    Rig rig = BakedDeath(swing);
+    const u32 tail = RotationChannel(rig, 1);
+    Document source = rig.document;
+    UnbakeClip(source, 0);
+    // As a build before the stretches left it: baked, then every key of the
+    // tail erased on the baked clip, and read.
+    ForgetStretches(*rig.document.clips[0].physics->baked);
+    std::erase_if(rig.document.clips[0].containers.front().subTracks,
+                  [&](const SubTrack& track) { return track.channel == tail; });
+    MarkBakeStretches(rig.document);
+    CHECK(BakedKeysEdited(rig.document, 0));
+    // One key set at the start, as Animations sets one on a bone with none.
+    const Quaternion turned = Quaternion::from_axis_angle(Vector3f{0, 1, 0}, 0.5f);
+    SubTrack key;
+    key.channel = tail;
+    key.interp = Interpolation::Slerp;
+    key.times = {0.0f};
+    key.values.resize(sizeof turned);
+    std::memcpy(key.values.data(), &turned, sizeof turned);
+    rig.document.clips[0].containers.front().subTracks.push_back(key);
+    // Baked, it plays that key up to the drop, and none of what was erased.
+    REQUIRE(BakeClip(rig.document, SimulateClip(rig.document, 0, swing.Hooks())).ok);
+    for (const f32 t : {0.0f, 0.125f, 0.25f}) {
+        CHECK(Degrees(RotationAt(rig.document, 0, 1, t), turned) < 0.05f);
+    }
+    CHECK_FALSE(BakedKeysEdited(rig.document, 0));
+    UnbakeClip(rig.document, 0);
+    const SubTrack* back = TrackOf(rig.document.clips[0], rig.model(), 1, Channel::Rotation);
+    REQUIRE(back != nullptr);
+    REQUIRE(back->times == std::vector<f32>{0.0f});
+    CHECK(std::memcmp(back->values.data(), &turned, sizeof turned) == 0);
+    // The root, which no one touched, is its source's to the byte.
+    const SubTrack* root = TrackOf(rig.document.clips[0], rig.model(), 0, Channel::Rotation);
+    const SubTrack* rootWas = TrackOf(source.clips[0], source.models[0], 0, Channel::Rotation);
+    REQUIRE(root != nullptr);
+    REQUIRE(rootWas != nullptr);
+    CHECK(ReflectBytes(*root) == ReflectBytes(*rootWas));
+}
+
+TEST_CASE("a record made before the stretches were kept gets them when it is read", "[physics][bake][record][io]") {
+    Swing swing;
+    Rig rig = BakedDeath(swing);
+    Document source = rig.document;
+    UnbakeClip(source, 0);
+    ForgetStretches(*rig.document.clips[0].physics->baked);
+    const std::vector<u8> bytes = Writer().write(rig.document);
+    const auto read = [&] { return Parser().parse(std::span<const u8>(bytes.data(), bytes.size())); };
+    std::optional<Document> document = read();
+    REQUIRE(document.has_value());
+    const PhysicsBake& record = *document->clips[0].physics->baked;
+    CHECK(record.stretchInside != 0);
+    CHECK(record.stretchChannels.size() == 2u);
+    CHECK_FALSE(BakedKeysEdited(*document, 0));
+    // Untouched, it unbakes to the byte.
+    Document plain = *document;
+    UnbakeClip(plain, 0);
+    CHECK(ReflectBytes(plain.clips[0].containers) == ReflectBytes(source.clips[0].containers));
+    // A key set beside the bake's keys is the clip's own, as in a record made now.
+    const Quaternion turned = Quaternion::from_axis_angle(Vector3f{0, 1, 0}, 0.5f);
+    u32 tail = kInvalidIndex;
+    for (const AnimChannel& channel : document->models[0].animChannels.channels) {
+        if (channel.target.kind == TrackTarget::Kind::Node && channel.target.node == 1 &&
+            channel.target.channel == Channel::Rotation) {
+            tail = channel.id;
+        }
+    }
+    SubTrack* keys = Keys(document->clips[0], tail);
+    REQUIRE(keys != nullptr);
+    std::memcpy(keys->values.data(), &turned, sizeof turned);
+    CHECK_FALSE(BakedKeysEdited(*document, 0));
+    UnbakeClip(*document, 0);
+    const SubTrack* back = TrackOf(document->clips[0], document->models[0], 1, Channel::Rotation);
+    const SubTrack* was = TrackOf(source.clips[0], source.models[0], 1, Channel::Rotation);
+    REQUIRE(back != nullptr);
+    REQUIRE(back->times == was->times);
+    CHECK(std::memcmp(back->values.data(), &turned, sizeof turned) == 0);
+    CHECK(std::memcmp(back->values.data() + sizeof turned, was->values.data() + sizeof turned,
+                      was->values.size() - sizeof turned) == 0);
+    // One whose baked keys were edited before the read: they read as the
+    // bake's, the record as edited, and it unbakes to its source.
+    Document edited = rig.document;
+    SubTrack* late = Keys(edited.clips[0], RotationChannel(rig, 1));
+    REQUIRE(late != nullptr);
+    std::memcpy(late->values.data() + (late->times.size() - 1) * sizeof turned, &turned, sizeof turned);
+    const std::vector<u8> editedBytes = Writer().write(edited);
+    std::optional<Document> again = Parser().parse(std::span<const u8>(editedBytes.data(), editedBytes.size()));
+    REQUIRE(again.has_value());
+    CHECK(again->clips[0].physics->baked->stretchInside != 0);
+    CHECK(BakedKeysEdited(*again, 0));
+    UnbakeClip(*again, 0);
+    CHECK(ReflectBytes(again->clips[0].containers) == ReflectBytes(source.clips[0].containers));
+}
+
+TEST_CASE("where a bake keyed is in no other clip's key", "[physics][bake][record]") {
+    Rig rig = Tailed({"Stand", "Attack"});
+    rig.document.clips[1].looping = false;
+    for (Clip& clip : rig.document.clips) {
+        clip.physics.emplace();
+    }
+    Swing swing;
+    REQUIRE(BakeClip(rig.document, SimulateClip(rig.document, 0, swing.Hooks())).ok);
+    REQUIRE(BakeClip(rig.document, SimulateClip(rig.document, 1, swing.Hooks())).ok);
+    REQUIRE(BakeInDate(rig.document, 1));
+    // Attack is matched into Stand's record as an older build wrote it, too.
+    ForgetStretches(*rig.document.clips[0].physics->baked);
+    CHECK(BakeInDate(rig.document, 1));
+    MarkBakeStretches(rig.document);
+    CHECK(rig.document.clips[0].physics->baked->stretchInside != 0);
+    CHECK(BakeInDate(rig.document, 1));
+    CHECK(BakeInDate(rig.document, 0));
 }
 
 TEST_CASE("a clip that goes to one played once meets its frame 0", "[physics][bake][seam]") {

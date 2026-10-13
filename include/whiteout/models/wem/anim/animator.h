@@ -24,6 +24,7 @@
  * not billboard (that needs a camera) and runs no pose stage.
  */
 
+#include <span>
 #include <vector>
 
 #include <whiteout/common_types.h>
@@ -117,6 +118,12 @@ public:
     /// needs.
     void sample(const Mix& mix, Pose& out, bool nodesOnly = false) const;
 
+    /// The same for the channels @p wanted marks alone, one flag a channel of
+    /// the model's table: every other value is left empty, and a node whose
+    /// transform is left out stands at its rig's rest. For a caller that
+    /// follows a few channels over many moments.
+    void sample(const Mix& mix, Pose& out, std::span<const u8> wanted) const;
+
     /// @p pose's `local` transforms from its channel values, as `sample` ends:
     /// for a host that changes the values between the two, as a blend of its
     /// own does.
@@ -161,6 +168,9 @@ private:
         bool resolved = false;
     };
 
+    /// `sample`, over the node transforms and stage channels alone with
+    /// @p nodesOnly, and over the channels @p wanted marks where it is given.
+    void sampleOnly(const Mix& mix, Pose& out, bool nodesOnly, const std::span<const u8>* wanted) const;
     const ClipLayers& layersOf(u32 clip) const;
     std::vector<Layer> layersFor(const Mix& mix) const;
     const std::vector<u8>& restOf(std::size_t channel) const;

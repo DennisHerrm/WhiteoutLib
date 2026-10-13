@@ -299,6 +299,14 @@ std::vector<Animator::Layer> Animator::layersFor(const Mix& mix) const {
 }
 
 void Animator::sample(const Mix& mix, Pose& out, bool nodesOnly) const {
+    sampleOnly(mix, out, nodesOnly, nullptr);
+}
+
+void Animator::sample(const Mix& mix, Pose& out, std::span<const u8> wanted) const {
+    sampleOnly(mix, out, false, &wanted);
+}
+
+void Animator::sampleOnly(const Mix& mix, Pose& out, bool nodesOnly, const std::span<const u8>* wanted) const {
     if (model_ == nullptr) {
         out = Pose{};
         return;
@@ -322,6 +330,9 @@ void Animator::sample(const Mix& mix, Pose& out, bool nodesOnly) const {
         const AnimChannel& channel = channels[c];
         // A stage's own channels ride with the skeleton: the stages read them.
         if (nodesOnly && !IsNodeTransform(channel.target) && !IsStageChannel(channel.target)) {
+            continue;
+        }
+        if (wanted != nullptr && (c >= wanted->size() || (*wanted)[c] == 0)) {
             continue;
         }
         const std::vector<u8>& rest = restOf(c);

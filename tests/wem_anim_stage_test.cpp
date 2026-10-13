@@ -8,6 +8,8 @@
 
 #include <cmath>
 #include <cstring>
+#include <set>
+#include <span>
 #include <sstream>
 #include <vector>
 
@@ -480,6 +482,76 @@ TEST_CASE("wem a Link reads its source as the Links before it leave it", "[wem][
     // The tip is off where the animation has it by then, and the bone with it.
     CHECK((OriginOf(later[rig.tip]) - OriginOf(Frames(rig.document, 1.4f, false)[rig.tip])).length() > 1.0f);
     CHECK((OriginOf(later[loose]) - OriginOf(Frames(rig.document, 1.4f, false)[loose])).length() > 1.0f);
+}
+
+TEST_CASE("wem a Link replays its switches along a host's timeline as along a clip", "[wem][anim][stages]") {
+    // The clip handed over as a timeline of the host's own, the same poses and
+    // the same keys: the stages leave each node where the mix leaves it. The
+    // tip rides the target for a while and a loose bone rides the tip, so the
+    // second Link reads the first at a moment of the timeline too.
+    Rig rig;
+    Node made;
+    made.name = "loose";
+    made.pivot = Vector3f{2, 3, 12};
+    made.kind = NodeKind::Bone;
+    const u32 loose = rig.document.models[0].nodes.add(made);
+    const PoseStage first = rig.stage(StageKind::Link, {rig.tip}, {rig.target});
+    const PoseStage second = rig.stage(StageKind::Link, {loose}, {rig.tip});
+    rig.key(first, 1, {0.0f, 0.3f, 1.2f}, {0.0f, 1.0f, 0.0f});
+    rig.key(second, 1, {0.0f, 0.5f}, {0.0f, 1.0f});
+    const Animator animator(rig.document, 0);
+    StageTimeline timeline;
+    timeline.sample = [&](f32 seconds, Pose& out) {
+        Mix mix;
+        mix.plays.push_back(Play{0, seconds, 1.0f, true});
+        mix.worldSeconds = seconds;
+        animator.sample(mix, out, true);
+    };
+    timeline.keys = [&](std::span<const u32> channels, f32 seconds) {
+        std::set<f32> times;
+        for (const u32 id : channels) {
+            if (const SubTrack* track = FindSubTrack(rig.document.clips[0], id)) {
+                for (const f32 t : track->times) {
+                    if (Milliseconds(t) <= Milliseconds(seconds)) {
+                        times.insert(t);
+                    }
+                }
+            }
+        }
+        return std::vector<f32>(times.begin(), times.end());
+    };
+    const StageRunner runner(rig.document, 0);
+    const auto staged = [&](f32 seconds) {
+        Pose pose;
+        timeline.sample(seconds, pose);
+        animator.compose(pose);
+        runner.constrain(animator, timeline, seconds, pose);
+        return pose.frame;
+    };
+    for (const f32 at : {0.0f, 0.2f, 0.3f, 0.7f, 1.2f, 1.9f}) {
+        INFO("at " << at);
+        const std::vector<Matrix44f> frames = staged(at);
+        const std::vector<Matrix44f> played = Frames(rig.document, at, true);
+        CHECK(Worst(frames[rig.tip], played[rig.tip]) < 1e-4f);
+        CHECK(Worst(frames[loose], played[loose]) < 1e-4f);
+    }
+    // Kept from one pose to the next, whatever order they come in, each
+    // switch is replayed once and leaves what it left.
+    StageCarries kept;
+    timeline.carries = &kept;
+    for (const f32 at : {1.9f, 0.7f, 0.2f, 1.2f, 0.7f, 1.9f}) {
+        INFO("kept, at " << at);
+        const std::vector<Matrix44f> frames = staged(at);
+        const std::vector<Matrix44f> played = Frames(rig.document, at, true);
+        CHECK(Worst(frames[rig.tip], played[rig.tip]) < 1e-4f);
+        CHECK(Worst(frames[loose], played[loose]) < 1e-4f);
+    }
+    CHECK(kept.offsets.size() == 5u);
+    timeline.carries = nullptr;
+    // The switches are the timeline's: with none on it the tip rides the
+    // target from its rest, not from where it stood 0.3 s in.
+    timeline.keys = [](std::span<const u32>, f32) { return std::vector<f32>{}; };
+    CHECK((OriginOf(staged(0.7f)[rig.tip]) - OriginOf(Frames(rig.document, 0.7f, true)[rig.tip])).length() > 1.0f);
 }
 
 TEST_CASE("wem a constraint reads a held node where it is held, and leaves a held node alone",

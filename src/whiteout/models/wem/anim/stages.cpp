@@ -306,14 +306,16 @@ std::vector<Matrix44f> Carried(const std::vector<Matrix44f>& offsets, const std:
 
 /// Where a Link's switches are in a mix: the first of its plays that keys any
 /// of the Link's sources' Enabled up to where it plays, where that is, and
-/// those keys' times in order. No play where nothing keys one.
+/// those keys' times in order. Not keyed where nothing keys one. On a host's
+/// timeline, the keys it has of them up to the mix's world clock.
 struct LinkSwitches {
-    const Play* play = nullptr;
+    bool keyed = false;
     f32 now = 0.0f;
     std::vector<f32> times;
 };
 
-LinkSwitches SwitchesOf(const Document& document, u32 modelIndex, const PoseStage& stage, const Mix& mix) {
+LinkSwitches SwitchesOf(const Document& document, u32 modelIndex, const PoseStage& stage, const Mix& mix,
+                        const StageTimeline* timeline) {
     LinkSwitches out;
     const Model& model = document.models[modelIndex];
     std::vector<u32> channels;
@@ -324,6 +326,14 @@ LinkSwitches SwitchesOf(const Document& document, u32 modelIndex, const PoseStag
         }
     }
     if (channels.empty()) {
+        return out;
+    }
+    if (timeline != nullptr) {
+        out.now = mix.worldSeconds;
+        if (timeline->keys) {
+            out.times = timeline->keys(channels, out.now);
+        }
+        out.keyed = !out.times.empty();
         return out;
     }
     for (const Play& play : mix.plays) {
@@ -350,7 +360,7 @@ LinkSwitches SwitchesOf(const Document& document, u32 modelIndex, const PoseStag
             }
         }
         if (!times.empty()) {
-            out.play = &play;
+            out.keyed = true;
             out.now = now;
             out.times.assign(times.begin(), times.end());
             break;
@@ -588,6 +598,11 @@ struct StageRunner::LinkPass {
         std::vector<StageHold> held; ///< What was held then, parents first.
     };
     const StageHolds* held = nullptr;
+    /// A host's timeline, where the moments are its and not a mix's plays,
+    /// and what its switches have left: the host's, or this pass's own.
+    const StageTimeline* timeline = nullptr;
+    StageCarries* kept = nullptr;
+    StageCarries own;
     Moment rest;
     bool rested = false;
     std::map<std::vector<i64>, Moment> moments;   ///< By `MomentOf`.
@@ -660,7 +675,7 @@ void StageRunner::constrainOne(const Animator& animator, const Mix& mix, Pose& p
         // the animation has it.
         const std::vector<f32> shares = CarrierShares(*model_, stage, pose);
         if (shares.front() >= 1.0f - kShareEpsilon &&
-            SwitchesOf(*document_, modelIndex_, stage, mix).play == nullptr) {
+            !SwitchesOf(*document_, modelIndex_, stage, mix, pass.timeline).keyed) {
             return;
         }
         // The node's own animation under whatever carries it: its place under
@@ -754,7 +769,12 @@ StageRunner::LinkReading StageRunner::linkReading(const Animator& animator, cons
     const auto begin = [&](LinkPass::Moment& moment, const Mix& at, bool resting) {
         moment = LinkPass::Moment{};
         moment.mix = at;
-        animator.evaluate(at, moment.pose);
+        if (!resting && pass.timeline != nullptr) {
+            pass.timeline->sample(at.worldSeconds, moment.pose);
+            animator.compose(moment.pose);
+        } else {
+            animator.evaluate(at, moment.pose);
+        }
         if (resting || pass.held == nullptr) {
             return;
         }
@@ -829,7 +849,7 @@ StageRunner::LinkCarry StageRunner::linkCarry(const Animator& animator, const Mi
     // that keys any, up to where it plays. Where one changes the shares, every
     // carrier is rebased onto the blend the old shares made, so the node stays
     // put: `O_i' = K_old·C_i⁻¹` at that moment.
-    const LinkSwitches switches = SwitchesOf(*document_, modelIndex_, stage, mix);
+    const LinkSwitches switches = SwitchesOf(*document_, modelIndex_, stage, mix, pass.timeline);
     const auto shifted = [&](f32 t) {
         Mix moved = mix;
         const f32 shift = t - switches.now;
@@ -841,25 +861,46 @@ StageRunner::LinkCarry StageRunner::linkCarry(const Animator& animator, const Mi
     };
     constexpr f32 kMillisecond = 0.001f;
     std::vector<f32> held = still.shares;
-    for (const f32 t : switches.times) {
+    // On a timeline a switch is replayed once: from the last one kept, on.
+    const auto keptAt = [&](f32 t) {
+        return std::pair<u32, i64>{static_cast<u32>(index), std::llround(static_cast<f64>(t) * 1e6)};
+    };
+    std::size_t first = 0;
+    for (std::size_t k = switches.times.size(); pass.kept != nullptr && k-- > 0;) {
+        const auto found = pass.kept->offsets.find(keptAt(switches.times[k]));
+        if (found != pass.kept->offsets.end() && found->second.size() == carry.offsets.size()) {
+            carry.offsets = found->second;
+            first = k + 1;
+            break;
+        }
+    }
+    for (std::size_t k = first; k < switches.times.size(); ++k) {
+        const f32 t = switches.times[k];
         // The shares just before, as they played a millisecond earlier: a
         // stepped key's the last key's, an interpolated one's nearly its
         // own. At the clip's start, rest's.
         if (t >= kMillisecond) {
             Pose before;
-            animator.sample(shifted(t - kMillisecond), before, true);
+            const Mix earlier = shifted(t - kMillisecond);
+            if (pass.timeline != nullptr) {
+                pass.timeline->sample(earlier.worldSeconds, before);
+            } else {
+                animator.sample(earlier, before, true);
+            }
             held = CarrierShares(*model_, stage, before);
         }
         const Mix then = shifted(t);
         const LinkReading at = linkReading(animator, &then, stage, pass, switches.now - t);
-        if (SameShares(at.shares, held)) {
-            continue;
+        if (!SameShares(at.shares, held)) {
+            const Matrix44f standing = BlendFrames(Carried(carry.offsets, at.carriers), held);
+            for (std::size_t i = 0; i < at.carriers.size(); ++i) {
+                carry.offsets[i] = standing * Matrix44f::inverse(at.carriers[i]);
+            }
+            held = at.shares;
         }
-        const Matrix44f standing = BlendFrames(Carried(carry.offsets, at.carriers), held);
-        for (std::size_t i = 0; i < at.carriers.size(); ++i) {
-            carry.offsets[i] = standing * Matrix44f::inverse(at.carriers[i]);
+        if (pass.kept != nullptr) {
+            pass.kept->offsets[keptAt(t)] = carry.offsets;
         }
-        held = at.shares;
     }
     pass.carries.emplace(std::move(key), carry);
     return carry;
@@ -1011,11 +1052,31 @@ void StageRunner::constrain(const Animator& animator, const Mix& mix, Pose& pose
 }
 
 void StageRunner::constrain(const Animator& animator, const Mix& mix, Pose& pose, const StageHolds& held) const {
+    constrainOn(animator, mix, pose, held, nullptr);
+}
+
+void StageRunner::constrain(const Animator& animator, const StageTimeline& timeline, f32 seconds, Pose& pose) const {
+    if (!timeline.sample) {
+        return;
+    }
+    // No play: the moment is the timeline's, by the world clock alone.
+    Mix moment;
+    moment.globals = false;
+    moment.worldSeconds = seconds;
+    constrainOn(animator, moment, pose, StageHolds{}, &timeline);
+}
+
+void StageRunner::constrainOn(const Animator& animator, const Mix& mix, Pose& pose, const StageHolds& held,
+                              const StageTimeline* timeline) const {
     if (model_ == nullptr) {
         return;
     }
     LinkPass pass;
     pass.held = &held;
+    pass.timeline = timeline;
+    if (timeline != nullptr) {
+        pass.kept = timeline->carries != nullptr ? timeline->carries : &pass.own;
+    }
     const std::vector<StageHold> now = InOrder(model_->nodes, pose, held.now);
     for (const StageHold& hold : now) {
         Stand(animator, model_->nodes, pose, hold);

@@ -92,6 +92,30 @@ struct StageHolds {
     std::function<std::span<const StageHold>(f32 secondsAgo)> earlier;
 };
 
+/// Where a timeline's switches have left its Links, for a host to keep from
+/// one pose to the next while the timeline and the document stand as they
+/// were: a Link then replays only the switches it has not met.
+struct StageCarries {
+    /// By a Link's place in the stages and a switch's time in microseconds:
+    /// the offset under each of its carriers once that switch is replayed.
+    std::map<std::pair<u32, i64>, std::vector<Matrix44f>> offsets;
+};
+
+/// A timeline a host composes itself, layers of its own laid over the clips,
+/// which no mix names: what the stages read of its other moments.
+struct StageTimeline {
+    /// The pose at @p seconds, as `Animator::sample` leaves one: the stage
+    /// channels' values and the nodes' locals.
+    std::function<void(f32 seconds, Pose& out)> sample;
+    /// The times up to @p seconds, ascending, where the timeline keys any of
+    /// @p channels, by id: where a Link whose sources' Enabled they are may
+    /// switch.
+    std::function<std::vector<f32>(std::span<const u32> channels, f32 seconds)> keys;
+    /// What the host keeps of it. Null: each pose replays every switch behind
+    /// it, once.
+    StageCarries* carries = nullptr;
+};
+
 /**
  * @brief Runs one model's stages on a pose, in the list's order.
  *
@@ -123,6 +147,11 @@ public:
     /// what holds them.
     void constrain(const Animator& animator, const Mix& mix, Pose& pose, const StageHolds& held) const;
 
+    /// The same on a host's own timeline, @p pose its pose at @p seconds,
+    /// composed: a Link replays its switches along @p timeline from its start,
+    /// as along a clip.
+    void constrain(const Animator& animator, const StageTimeline& timeline, f32 seconds, Pose& pose) const;
+
     /// Drops every physics state and snapshot: a clip change, a loop restart,
     /// an undo.
     void reset(const StageHooks* hooks = nullptr);
@@ -151,6 +180,10 @@ private:
         std::vector<f32> shares;
     };
 
+    /// `constrain`, a Link's other moments read from @p timeline where it is
+    /// given, each named by a mix's world clock.
+    void constrainOn(const Animator& animator, const Mix& mix, Pose& pose, const StageHolds& held,
+                     const StageTimeline* timeline) const;
     void constrainOne(const Animator& animator, const Mix& mix, Pose& pose, const PoseStage& stage,
                       LinkPass& pass) const;
     /// `constrainOne` on a pose where @p held's nodes, parents first, are held.

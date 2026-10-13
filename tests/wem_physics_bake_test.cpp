@@ -271,6 +271,27 @@ TEST_CASE("G-SW a drop carries into the clip that continues it", "[physics][bake
     CHECK(Actives(rig.at(3, 0.5f)) == std::vector<bool>{false, true});
 }
 
+TEST_CASE("G-SW a corpse's clip keeps what its death let go of by a key", "[physics][bake][switches]") {
+    // The second body is a prop no rig holds, which the Death lets go of.
+    Rig rig(RigStart::OnDeath, {true, true}, {"Stand", "Death", "Dissipate", "Attack"});
+    rig.model().physics.rigs.front().bodies.pop_back();
+    rig.key(1, rig.bodies[1], Channel::PhysicsDynamic, {0.0f, 0.3f}, {0.0f, 1.0f});
+    // Not set up, the Dissipate carries nothing.
+    CHECK(Actives(rig.at(2, 0.5f)) == std::vector<bool>{false, false});
+    rig.document.clips[2].physics.emplace();
+    const std::vector<BodySwitch> corpse = rig.at(2, 0.0f);
+    CHECK(Actives(corpse) == std::vector<bool>{true, true});
+    CHECK(corpse[1].why == SwitchWhy::Carried);
+    // A clip that is no corpse's carries the drop and not the prop.
+    rig.document.clips[3].looping = false;
+    rig.document.clips[3].physics.emplace().comesFrom = BakeFrom::Clip;
+    rig.document.clips[3].physics->comesFromClip = "Death";
+    CHECK(Actives(rig.at(3, 0.0f)) == std::vector<bool>{true, false});
+    // Its own key decides where the clip has one.
+    rig.key(2, rig.bodies[1], Channel::PhysicsDynamic, {0.0f}, {0.0f});
+    CHECK(Actives(rig.at(2, 0.5f)) == std::vector<bool>{true, false});
+}
+
 TEST_CASE("G-SW the switches' rests are the rule's", "[physics][bake][switches]") {
     Rig always(RigStart::Always, {true, false}, {"Stand"});
     TrackTarget target;
@@ -359,9 +380,10 @@ TEST_CASE("G-PO a bake loops by the flag or the name or as set", "[physics][bake
 
 TEST_CASE("a clip comes from Stand and a corpse from its death and a loop from itself", "[physics][bake][chain]") {
     Rig rig(RigStart::OnDeath, {true},
-            {"Stand Ready", "Stand - 1", "Attack", "Death", "Decay Flesh", "Decay Bone", "Walk", "Decay"});
+            {"Stand Ready", "Stand - 1", "Attack", "Death", "Decay Flesh", "Decay Bone", "Walk", "Decay", "Dissipate"});
     std::vector<Clip>& clips = rig.document.clips;
     clips[2].looping = clips[3].looping = clips[4].looping = clips[5].looping = clips[7].looping = false;
+    clips[8].looping = false;
     CHECK(BakeComesFrom(rig.document, 6).kind == BakeFrom::Itself);
     const BakeLeadIn attack = BakeComesFrom(rig.document, 2);
     CHECK(attack.kind == BakeFrom::Clip);
@@ -370,6 +392,9 @@ TEST_CASE("a clip comes from Stand and a corpse from its death and a loop from i
     CHECK(BakeComesFrom(rig.document, 4).clip == 3u);
     CHECK(BakeComesFrom(rig.document, 5).clip == 4u);
     CHECK(BakeComesFrom(rig.document, 7).clip == 3u);
+    // A hero's corpse dissipates where its death left it.
+    CHECK(BakeComesFrom(rig.document, 8).clip == 3u);
+    CHECK(BakeChain(rig.document, 8) == std::vector<u32>{1, 3});
     CHECK(BakeChain(rig.document, 5) == std::vector<u32>{1, 3, 4});
     CHECK(BakeGoesTo(rig.document, 2) == 1u);
     CHECK(BakeGoesTo(rig.document, 3) == kInvalidIndex);
@@ -692,6 +717,41 @@ TEST_CASE("a once-played clip runs after what it comes from", "[physics][bake][r
     const BakeRun held = SimulateClip(rig.document, 1, swing.Hooks());
     CHECK(held.pieces.front().held);
     CHECK(held.first == 120u);
+}
+
+TEST_CASE("a corpse's clip starts where its death's own bake ended", "[physics][bake][run]") {
+    // A Death that steps at another length than the Dissipate continuing it,
+    // and preheats another number of times.
+    Rig rig = Tailed({"Stand", "Death", "Dissipate"});
+    std::vector<Clip>& clips = rig.document.clips;
+    clips[1].looping = clips[2].looping = false;
+    clips[1].duration = 0.99f;
+    clips[1].physics.emplace().preheat = 3;
+    clips[2].physics.emplace().preheat = 1;
+    Swing swing;
+    const BakeRun death = SimulateClip(rig.document, 1, swing.Hooks());
+    const BakeRun corpse = SimulateClip(rig.document, 2, swing.Hooks());
+    REQUIRE(death.complete);
+    REQUIRE(corpse.complete);
+    // Stand as the Death preheats it, the Death at its own step, then the clip.
+    REQUIRE(corpse.pieces.size() == 3u);
+    CHECK(corpse.first == death.first + death.steps);
+    CHECK(corpse.times.front() == Approx(death.times.front() - 1.0f).margin(0.02));
+    const std::size_t shared = static_cast<std::size_t>(corpse.first) * corpse.nodes.size();
+    REQUIRE(death.locals.size() >= shared);
+    CHECK(std::memcmp(death.locals.data(), corpse.locals.data(), shared * sizeof(Transform)) == 0);
+
+    // Handed back at the switch, the tail leaves from where the simulation
+    // left it, not from where the Death keys it, and is on its keys once the
+    // switch is over.
+    rig.key(2, rig.bodies[1], Channel::PhysicsDynamic, {0.0f}, {0.0f});
+    const BakeRun handed = SimulateClip(rig.document, 2, swing.Hooks());
+    REQUIRE(handed.complete);
+    const Quaternion left = handed.localsAt(handed.first - 1)[1].rotation;
+    REQUIRE(Degrees(left, RotationAt(rig.document, 1, 1, clips[1].duration)) > 0.5f);
+    CHECK(Degrees(handed.localsAt(handed.first)[1].rotation, left) < 0.01f);
+    const u32 over = handed.first + 12;
+    CHECK(Degrees(handed.localsAt(over)[1].rotation, RotationAt(rig.document, 2, 1, handed.localTimes[over])) < 0.01f);
 }
 
 TEST_CASE("G-B2 the bake writes only where the body simulated", "[physics][bake][splice]") {

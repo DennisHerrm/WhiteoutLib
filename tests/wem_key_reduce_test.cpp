@@ -612,6 +612,47 @@ TEST_CASE("exact: a channel whose clips disagree keeps its inner keys", "[wem][k
     RequireSameReads(before, f.document);
 }
 
+TEST_CASE("exact: a channel whose clips disagree goes at its rest only whole", "[wem][keys]") {
+    // A hold in one clip and a line in the others, saying the rest: the written
+    // track is one constant whichever of them names its interpolation. Once a
+    // clip moves, dropping the line beside it could hand the name on.
+    for (const bool moves : {false, true}) {
+        Fixture f;
+        const u32 t = f.channel(0, Channel::Translation, geom::AttrType::F32x3);
+        const u32 held = f.clip(ReadRule::Wc3);
+        const u32 lined = f.clip(ReadRule::Wc3);
+        const u32 third = f.clip(ReadRule::Wc3);
+        f.key<Vector3f>(held, t, {0.0f, 1.0f}, {V(0, 0, 0), V(0, 0, 0)}, Interpolation::Step);
+        f.key<Vector3f>(lined, t, {0.0f, 1.0f}, {V(0, 0, 0), V(0, 0, 0)});
+        f.key<Vector3f>(third, t, {0.0f, 1.0f}, {V(0, 0, 0), moves ? V(4, 0, 0) : V(0, 0, 0)});
+        const Document before = f.document;
+        const ExactKeyReport report = DropRestTracks(f.document, 0);
+        CHECK(report.subTracksDropped == (moves ? 0u : 3u));
+        CHECK(KeyedAnywhere(f.document, 0, t) == moves);
+        RequireSameReads(before, f.document);
+    }
+}
+
+TEST_CASE("exact: the rest step alone drops tracks at rest and no other key", "[wem][keys]") {
+    // What an export runs on its copy: the scale every clip keys at one goes,
+    // and the move keeps the key a line reproduces.
+    Fixture f;
+    const u32 t = f.channel(0, Channel::Translation, geom::AttrType::F32x3);
+    const u32 s = f.channel(0, Channel::Scale, geom::AttrType::F32x3);
+    const u32 first = f.clip(ReadRule::Wc3);
+    const u32 second = f.clip(ReadRule::Wc3);
+    f.key<Vector3f>(first, s, {0.0f, 1.0f}, {V(1, 1, 1), V(1, 1, 1)});
+    f.key<Vector3f>(second, s, {0.0f, 1.0f}, {V(1, 1, 1), V(1, 1, 1)});
+    f.key<Vector3f>(first, t, {0.0f, 0.5f, 1.0f}, {V(0, 0, 0), V(1, 0, 0), V(2, 0, 0)});
+    const Document before = f.document;
+    const ExactKeyReport report = DropRestTracks(f.document, 0);
+    CHECK(report.subTracksDropped == 2);
+    CHECK(report.keysRemoved == 4);
+    CHECK_FALSE(KeyedAnywhere(f.document, 0, s));
+    CHECK(f.keys(f.document, first, t) == 3);
+    RequireSameReads(before, f.document);
+}
+
 TEST_CASE("exact: a step equal to the one before it goes", "[wem][keys]") {
     Fixture f;
     const u32 v = f.channel(0, Channel::Visibility, geom::AttrType::F32);

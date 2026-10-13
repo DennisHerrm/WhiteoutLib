@@ -23,6 +23,7 @@
 
 #include <whiteout/models/mdx/parser.h>
 #include <whiteout/models/mdx/writer.h>
+#include <whiteout/models/wem/anim/track_read.h>
 #include <whiteout/models/wem/converters.h>
 #include <whiteout/models/wem/materials/ops.h>
 #include <whiteout/models/wem/validate.h>
@@ -360,6 +361,53 @@ TEST_CASE("wem mdx an event object's times become clip events", "[wem][anim][mdx
     // 9000 is in no sequence's window, so it fires in no clip. Not an error —
     // shipped models carry keys past the last sequence.
     CHECK(stand->events.size() + walk->events.size() == 2u);
+}
+
+TEST_CASE("wem mdx an event's global sequence is the loop it is keyed in", "[wem][anim][mdx]") {
+    mdx::Model model = makeModel();
+    model.globalSequences = {800};
+    mdx::EventObject looped;
+    looped.node = makeNode("SNDxLOOP", 1, 0);
+    looped.globalSequenceId = 0;
+    looped.eventTrackTimes = {250};
+    model.eventObjects.push_back(looped);
+    // On the loop in its file, with no time on it.
+    mdx::EventObject silent;
+    silent.node = makeNode("SNDxNONE", 2, 0);
+    silent.globalSequenceId = 0;
+    model.eventObjects.push_back(silent);
+
+    Document document = convert(model);
+    MdxConverter converter;
+    {
+        const Result<mdx::Model> exported = converter.toMdx(document, ProfileId::Wc3Classic);
+        REQUIRE(exported.ok());
+        REQUIRE(exported->eventObjects.size() == 2u);
+        CHECK(exported->eventObjects[0].globalSequenceId == 0u);
+        CHECK(exported->eventObjects[0].eventTrackTimes == std::vector<u32>{250});
+        // Nothing keys it, so it is on no clock: the node holds none of its own.
+        CHECK(exported->eventObjects[1].globalSequenceId == 0xFFFFFFFFu);
+    }
+
+    // Keyed in an animation instead, it leaves the loop with its keys.
+    std::vector<ClipEvent> moved;
+    for (Clip& clip : document.clips) {
+        if (IsGlobalLoop(clip)) {
+            moved = std::move(clip.events);
+            clip.events.clear();
+        }
+    }
+    REQUIRE(moved.size() == 1u);
+    for (Clip& clip : document.clips) {
+        if (clip.name == "Walk") {
+            clip.events = moved;
+        }
+    }
+    const Result<mdx::Model> exported = converter.toMdx(document, ProfileId::Wc3Classic);
+    REQUIRE(exported.ok());
+    REQUIRE(exported->eventObjects.size() == 2u);
+    CHECK(exported->eventObjects[0].globalSequenceId == 0xFFFFFFFFu);
+    CHECK(exported->eventObjects[0].eventTrackTimes == std::vector<u32>{2250});
 }
 
 TEST_CASE("wem mdx an event object's name is its category and code", "[wem][nodes][mdx]") {

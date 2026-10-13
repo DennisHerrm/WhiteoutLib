@@ -39,7 +39,7 @@ enum class SwitchWhy : u8 {
     Keyed,     ///< This clip's own switch key.
     Dropped,   ///< Its ragdoll's *Ragdoll now* key.
     Death,     ///< An *On death* ragdoll, in a clip named Death.
-    Carried,   ///< A drop carried from the clip this one comes from.
+    Carried,   ///< A drop, or in a corpse's clip the body's own key, carried from the clip this one comes from.
     Inherited, ///< Its nearest bodied ancestor's state.
     Exempt,    ///< Its ragdoll is dropped, and it ignores the drop.
 };
@@ -135,6 +135,7 @@ private:
     struct Body {
         bool still = false;   ///< Static, or held only by *Never* rigs.
         bool rest = false;    ///< Its own state where nothing keys it.
+        bool carried = false; ///< A corpse's clip: on, as the clip it continues ends by the body's key.
         bool exempt = false;
         bool inherit = false;
         u32 ancestor = kInvalidIndex; ///< The nearest bodied ancestor, by index.
@@ -182,6 +183,9 @@ std::string BaseSequenceName(std::string_view name);
 /// death (§4.3).
 bool IsDecayClipName(std::string_view name);
 
+/// A Decay, or a hero's "Dissipate": the clips that continue a death (§4.3).
+bool IsCorpseClipName(std::string_view name);
+
 /// Whether the games play a clip of @p name once, whatever its loop flag says
 /// (§7.1): Attack, Spell but Spell Channel, Death, Decay, Birth, Dissipate,
 /// Morph and Stand Hit, by the base name's first words. CamelCase splits into
@@ -201,9 +205,9 @@ struct BakeLeadIn {
 
 /// @p clip's *Comes from* (§7.2). A loop comes from itself; a once-played
 /// clip from Stand (the model's first looping clip whose base name is Stand),
-/// else its first frame. Decay Flesh, or a lone Decay, comes from the first
-/// death clip, and Decay Bone from Decay Flesh. A name the model lacks is its
-/// first frame.
+/// else its first frame. Decay Flesh, a lone Decay or a Dissipate comes from
+/// the first death clip, and Decay Bone from Decay Flesh. A name the model
+/// lacks is its first frame.
 BakeLeadIn BakeComesFrom(const Document& document, u32 clip);
 
 /// @p clip's *Goes to* (§7.4): for a once-played clip, Stand after an Attack,

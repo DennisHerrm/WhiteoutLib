@@ -39,6 +39,7 @@
 #include "whiteout/models/wem/geometry/render_view.h"
 #include "whiteout/models/wem/meshes/remove.h"
 #include "whiteout/models/wem/nodes/presence.h"
+#include "whiteout/models/wem/nodes/remove.h"
 #include "whiteout/models/wem/skinning/quantize.h"
 
 #include "../materials/mdx_core.h"
@@ -2321,6 +2322,138 @@ u32 RetireNodesUnwritableAt(Document& document, u32 version, Diagnostics& out) {
     return retired;
 }
 
+namespace {
+
+/// Per node of @p model: whether a clip event fires at it, and whether
+/// anything names it other than a key or a channel of its own.
+struct EventUse {
+    std::vector<u8> fired;
+    std::vector<u8> held;
+};
+
+EventUse EventUseOf(const Document& document, u32 m) {
+    const Model& model = document.models[m];
+    const u32 count = model.nodes.size();
+    EventUse use{std::vector<u8>(count, 0), std::vector<u8>(count, 0)};
+    const auto reference = [&](NodeReference row, const u32& node, u32, u32) {
+        if (node >= count) {
+            return;
+        }
+        if (row == NodeReference::ClipEvent) {
+            use.fired[node] = 1;
+        } else if (row != NodeReference::Channel) {
+            use.held[node] = 1;
+        }
+    };
+    ForEachNodeReference(model.nodes, std::span<const Mesh>(model.meshes), &model.animChannels,
+                         &model.poseStages, &model.physics, std::span<const Clip>(), reference);
+    for (const Clip& clip : document.clips) {
+        if (clip.model == m) {
+            ForEachClipNodeReference(clip, 0, reference);
+        }
+    }
+    return use;
+}
+
+bool IsUnfiredEvent(const Node& node, const EventUse& use, u32 index) {
+    return node.kind == NodeKind::Event && !node.removed && use.fired[index] == 0;
+}
+
+} // namespace
+
+bool CarriesUnfiredEvents(const Document& document) {
+    for (u32 m = 0; m < document.models.size(); ++m) {
+        const NodeTree& tree = document.models[m].nodes;
+        const auto event = [](const Node& node) { return node.kind == NodeKind::Event && !node.removed; };
+        if (std::none_of(tree.nodes.begin(), tree.nodes.end(), event)) {
+            continue;
+        }
+        const EventUse use = EventUseOf(document, m);
+        for (u32 n = 0; n < tree.size(); ++n) {
+            if (IsUnfiredEvent(tree.nodes[n], use, n)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+u32 DropUnfiredEvents(Document& document, Diagnostics& out) {
+    u32 dropped = 0;
+    u32 retired = 0;
+    for (u32 m = 0; m < document.models.size(); ++m) {
+        Model& model = document.models[m];
+        NodeTree& tree = model.nodes;
+        const u32 count = tree.size();
+        const EventUse use = EventUseOf(document, m);
+
+        NodeReferencers referencers;
+        referencers.meshes = model.meshes;
+        referencers.channels = &model.animChannels;
+        referencers.stages = &model.poseStages;
+        referencers.physics = &model.physics;
+        std::vector<u32> channels;
+        u32 removed = 0;
+        // From the end, so an event under an event is gone before its parent
+        // is asked what hangs from it.
+        for (u32 n = count; n-- > 0;) {
+            Node& node = tree.nodes[n];
+            if (!IsUnfiredEvent(node, use, n)) {
+                continue;
+            }
+            bool parent = false;
+            for (const u32 child : tree.children(n)) {
+                parent = parent || !tree.nodes[child].removed;
+            }
+            if (parent || use.held[n] != 0) {
+                node.kind = NodeKind::Helper;
+                node.resetPayloadForKind();
+                // The writer copies the word, and the game reads the kind from it.
+                if (const NodeNative::Entry* bits = node.native.find("mdxFlagBits")) {
+                    node.native.set("mdxFlagBits",
+                                    bits->value & ~static_cast<i64>(mdx::Node::NodeFlag::EventObject));
+                }
+                ++retired;
+                continue;
+            }
+            for (const AnimChannel& channel : model.animChannels.channels) {
+                if (channel.target.kind == TrackTarget::Kind::Node && channel.target.node == n) {
+                    channels.push_back(channel.id);
+                }
+            }
+            removed += RemoveNode(tree, n, RemovePolicy::ReparentChildren, SkinPolicy::Refuse, true,
+                                  referencers)
+                               .removed
+                           ? 1u
+                           : 0u;
+        }
+        if (removed == 0) {
+            continue;
+        }
+        // A gone node's channels go with it rather than be left invalidated.
+        EraseChannels(document, m, channels);
+        const NodeRemaps remaps = CompactNodes(tree, referencers, out);
+        // `CompactNodes` takes a clip span, and this model's clips are not one.
+        for (Clip& clip : document.clips) {
+            if (clip.model == m) {
+                RemapClipNodes(clip, remaps.nodes);
+            }
+        }
+        dropped += removed;
+    }
+    if (dropped + retired != 0) {
+        std::string message = std::to_string(dropped + retired) +
+                              " event object(s) that no animation fires are left out";
+        if (retired != 0) {
+            message += "; " + std::to_string(retired) +
+                       " of them hold up other nodes and are written as helpers";
+        }
+        out.info(DiagCode::NodeKindNotCarried, std::move(message),
+                 ElementRef(ElementKind::Document, 0));
+    }
+    return dropped + retired;
+}
+
 Result<mdx::Model> MdxConverter::toMdx(const Document& document, ProfileId profile,
                                        u32 targetVersion, std::optional<ProfileId> skinAs,
                                        std::optional<u32> drawnSecondUvSet) const {
@@ -2761,9 +2894,8 @@ Result<mdx::Model> MdxConverter::toMdx(const Document& document, ProfileId profi
             mdx::EventObject event;
             event.node = buildNode(i);
             event.node.name = eventName(node);
-            if (const auto* payload = std::get_if<EventPayload>(&node.payload)) {
-                event.globalSequenceId = payload->id;
-            }
+            // Its global sequence is the global loop its times are keyed in
+            // (`mdx_anim`), as any track's: an event nothing keys has none.
             claim(i, mdx_anim::ExportContext::Slot::EventObject, out.eventObjects.size());
             out.eventObjects.push_back(std::move(event));
             break;
@@ -3125,6 +3257,12 @@ Result<std::vector<u8>> MdxConverter::exportToBytes(const Document& document, Pr
     if (version <= 800 && carriesCorn()) {
         writable = document;
         RetireNodesUnwritableAt(*writable, version, result.diagnostics);
+    }
+    if (CarriesUnfiredEvents(document)) {
+        if (!writable) {
+            writable = document;
+        }
+        DropUnfiredEvents(*writable, result.diagnostics);
     }
     Result<mdx::Model> converted = toMdx(writable ? *writable : document, profile, version);
     result.diagnostics.append(converted.diagnostics);

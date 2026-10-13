@@ -431,12 +431,13 @@ Vector3f Forward(const Document& document) {
     return GameOf(document.defaultProfile) == Game::StarCraft ? Vector3f{0, -1, 0} : Vector3f{1, 0, 0};
 }
 
-/// One stretch of a run: a clip from @p step for @p steps.
+/// One stretch of a run: a clip from @p step for @p steps, each @p dt long.
 struct Piece {
     u32 clip = kInvalidIndex;
     u32 step = 0;
     u32 steps = 0;
     enum class Kind : u8 { Loops, Once, Held, Baked, Post } kind = Kind::Once;
+    f32 dt = 1.0f / 60.0f;
 };
 
 /// The clip's own time @p k steps into @p piece.
@@ -619,6 +620,13 @@ u64 Inputs(const Document& document, u32 clip, bool bounds) {
         source.physics->baked.reset();
         Hash(hash, InputBytes(source, bounds));
     }
+    // How a once-played clip of the lead-in runs is the library's: as its own
+    // bake runs it, where it ran at this clip's step and Preheat. Said only of
+    // a clip with one, so every other key reads as it did.
+    if (std::any_of(clips.begin(), clips.end() - 1, [&](u32 c) { return !BakeLoops(document.clips[c]); })) {
+        const u8 lead = 1; // 1: at its own step, after its own lead-in (2026-10-13).
+        Hash(hash, std::span<const u8>(&lead, 1));
+    }
     // A clip not set up carries no dropped rig over from what it comes from
     // (switches.cpp). Said only of one that is not, so a clip baked when every
     // baked clip was set up reads as it did.
@@ -702,47 +710,71 @@ BakeRun SimulateClip(const Document& given, u32 clip, const BakeHooks& hooks, co
     run.steps = BakeStepsOf(document, clip, run.dt);
     const u32 preheat = std::min<u32>(settings.preheat, 20);
     const f32 dt = run.dt;
-    const auto stepsOf = [&](f32 seconds) { return std::max<u32>(1, static_cast<u32>(std::lround(seconds / dt))); };
+    const auto stepsOf = [](f32 seconds, f32 step) {
+        return std::max<u32>(1, static_cast<u32>(std::lround(seconds / step)));
+    };
 
     // The pieces: what runs before frame 0, the clip, and any post-roll.
     std::vector<Piece> pieces;
     u32 at = 0;
-    const auto add = [&](u32 c, u32 steps, Piece::Kind kind) {
-        pieces.push_back(Piece{c, at, steps, kind});
+    const auto add = [&](u32 c, u32 steps, Piece::Kind kind, f32 step) {
+        pieces.push_back(Piece{c, at, steps, kind, step});
         at += steps;
     };
     const bool loops = BakeLoops(baked);
     const BakeLeadIn from = BakeComesFrom(document, clip);
+    // The lead-in's loops, for the settling below.
+    u32 leadLoops = preheat;
     if (from.kind == BakeFrom::Itself) {
         if (preheat > 0) {
-            add(clip, preheat * run.steps, Piece::Kind::Loops);
+            add(clip, preheat * run.steps, Piece::Kind::Loops, dt);
         }
     } else if (from.kind == BakeFrom::FirstFrame) {
         if (preheat > 0) {
-            add(clip, stepsOf(static_cast<f32>(preheat)), Piece::Kind::Held);
+            add(clip, stepsOf(static_cast<f32>(preheat), dt), Piece::Kind::Held, dt);
         }
     } else {
+        // A once-played clip of the chain runs as its own bake runs it: at its
+        // own step and after its own lead-in, so what continues it (a Decay, a
+        // Dissipate) starts where that bake ended. A loop at the head is the
+        // lead-in of the clip after it, and takes that clip's Preheat and step.
         const std::vector<u32> chain = BakeChain(document, clip);
         for (std::size_t i = 0; i < chain.size(); ++i) {
             const Clip& lead = document.clips[chain[i]];
             if (i == 0 && BakeLoops(lead)) {
-                add(chain[i], std::max<u32>(1, preheat) * stepsOf(lead.duration), Piece::Kind::Loops);
+                const u32 next = i + 1 < chain.size() ? chain[i + 1] : clip;
+                f32 step = dt;
+                BakeStepsOf(document, next, step);
+                leadLoops = std::max<u32>(1, std::min<u32>(SettingsOf(document.clips[next]).preheat, 20));
+                add(chain[i], leadLoops * stepsOf(lead.duration, step), Piece::Kind::Loops, step);
                 continue;
             }
-            if (i == 0 && preheat > 0) {
-                add(chain[i], stepsOf(static_cast<f32>(preheat)), Piece::Kind::Held);
+            f32 step = dt;
+            const u32 steps = std::max<u32>(1, BakeStepsOf(document, chain[i], step));
+            if (const u32 own = std::min<u32>(SettingsOf(lead).preheat, 20); i == 0 && own > 0) {
+                if (BakeComesFrom(document, chain[i]).kind == BakeFrom::Itself) {
+                    leadLoops = own;
+                    add(chain[i], own * steps, Piece::Kind::Loops, step);
+                } else {
+                    add(chain[i], stepsOf(static_cast<f32>(own), step), Piece::Kind::Held, step);
+                }
             }
-            add(chain[i], stepsOf(lead.duration), Piece::Kind::Once);
+            add(chain[i], steps, Piece::Kind::Once, step);
         }
     }
     run.first = at;
-    add(clip, run.steps + 1, Piece::Kind::Baked);
+    const std::size_t baking = pieces.size();
+    add(clip, run.steps + 1, Piece::Kind::Baked, dt);
     // A loop matched at its start reads the cycle after it (§7.3).
     if (loops && settings.match == LoopMatch::Crossfade &&
         (settings.where == MatchWhere::Start || settings.where == MatchWhere::Both)) {
         const u32 window = std::max<u32>(1, static_cast<u32>(std::lround(settings.window * run.steps)));
-        pieces.push_back(Piece{clip, at, window, Piece::Kind::Post});
-        at += window;
+        add(clip, window, Piece::Kind::Post, dt);
+    }
+    // The run's clock where each piece starts.
+    std::vector<f32> starts(pieces.size(), 0.0f);
+    for (std::size_t p = 1; p < pieces.size(); ++p) {
+        starts[p] = starts[p - 1] + static_cast<f32>(pieces[p - 1].steps) * pieces[p - 1].dt;
     }
     for (const Piece& piece : pieces) {
         run.pieces.push_back(BakeRun::Piece{piece.clip, piece.step, piece.kind == Piece::Kind::Held});
@@ -838,15 +870,28 @@ BakeRun SimulateClip(const Document& given, u32 clip, const BakeHooks& hooks, co
         // The game's switch into a clip other than the one before.
         const bool switching = p > 0 && pieces[p - 1].clip != piece.clip;
         const ClipTransition into = switching ? ClipTransitionInto(document, piece.clip) : ClipTransition{0.0f};
+        // A snapshot freezes the pose it finds, and a body the simulation still
+        // moved there stands where that left it, as its baked keys play it:
+        // not where the clip switched from keys it. By body, its node's local.
+        std::vector<std::pair<u32, Transform>> left;
+        if (const Transform* last = run.localsAt(run.recorded() - 1);
+            switching && into.curve == ClipTransition::Curve::Snapshot && last != nullptr) {
+            for (u32 b = 0; b < run.bodies && b < previous.size(); ++b) {
+                const auto node = std::lower_bound(run.nodes.begin(), run.nodes.end(), owner.physics.bodies[b].node);
+                if (previous[b].active && node != run.nodes.end() && *node == owner.physics.bodies[b].node) {
+                    left.emplace_back(b, last[node - run.nodes.begin()]);
+                }
+            }
+        }
         const f32 speed = own.travel ? ClipMoveSpeed(playing) : 0.0f;
         for (u32 k = 0; k < piece.steps; ++k) {
             if (cancel != nullptr && cancel->load()) {
                 return run;
             }
-            const f32 local = LocalTime(document, piece, k, dt);
+            const f32 local = LocalTime(document, piece, k, piece.dt);
             Mix mix;
-            mix.worldSeconds = static_cast<f32>(piece.step + k) * dt;
-            const f32 into_t = static_cast<f32>(k) * dt;
+            mix.worldSeconds = starts[p] + static_cast<f32>(k) * piece.dt;
+            const f32 into_t = static_cast<f32>(k) * piece.dt;
             const f32 w = switching ? TransitionWeight(into, into_t) : 1.0f;
             mix.plays.push_back(Play{piece.clip, local, w, false});
             if (switching && w < 1.0f) {
@@ -854,15 +899,41 @@ BakeRun SimulateClip(const Document& given, u32 clip, const BakeHooks& hooks, co
                 // (Warcraft III), or playing on, from the step after its last.
                 const Piece& before = pieces[p - 1];
                 const u32 carried = into.curve == ClipTransition::Curve::Snapshot ? before.steps : before.steps + k;
+                // Its own steps at its own length, those since at this piece's.
+                const f32 on = before.dt == piece.dt
+                                   ? static_cast<f32>(carried) * piece.dt
+                                   : static_cast<f32>(before.steps) * before.dt +
+                                         static_cast<f32>(carried - before.steps) * piece.dt;
                 const f32 then = before.kind == Piece::Kind::Loops
-                                     ? std::fmod(static_cast<f32>(carried) * dt,
-                                                 std::max(document.clips[before.clip].duration, 1e-6f))
-                                     : std::min(static_cast<f32>(carried) * dt, document.clips[before.clip].duration);
+                                     ? std::fmod(on, std::max(document.clips[before.clip].duration, 1e-6f))
+                                     : std::min(on, document.clips[before.clip].duration);
                 mix.plays.push_back(Play{before.clip, before.kind == Piece::Kind::Held ? 0.0f : then, 1.0f, false});
             }
             Pose pose;
             animator.evaluate(mix, pose);
             readers[p].read(local, previous, now);
+            if (w < 1.0f && !left.empty()) {
+                Mix alone;
+                alone.worldSeconds = mix.worldSeconds;
+                alone.plays.push_back(Play{piece.clip, local, 1.0f, false});
+                Pose incoming;
+                animator.sample(alone, incoming, true);
+                bool handed = false;
+                for (const auto& [body, was] : left) {
+                    // One the new clip simulates on is the simulation's still.
+                    const u32 node = owner.physics.bodies[body].node;
+                    if ((body < now.size() && now[body].active) || node >= incoming.local.size()) {
+                        continue;
+                    }
+                    const Transform blended = Blended(was, incoming.local[node], w);
+                    pose.local[node].translation = blended.translation;
+                    pose.local[node].rotation = blended.rotation;
+                    handed = true;
+                }
+                if (handed) {
+                    animator.compose(pose);
+                }
+            }
             if (!around.empty()) {
                 // By node: what this step writes, and what of it is still the
                 // simulation's own (a body being handed back is not).
@@ -893,7 +964,7 @@ BakeRun SimulateClip(const Document& given, u32 clip, const BakeHooks& hooks, co
             step.floor = own.floor;
             step.floorHeight = root < pose.frame.size() ? pose.frame[root].data[3][2] - restHeight : 0.0f;
             step.travel = travel;
-            step.dt = dt;
+            step.dt = piece.dt;
             step.lower = lower;
             step.upper = upper;
             hooks.step(document, model, step, pose);
@@ -956,10 +1027,13 @@ BakeRun SimulateClip(const Document& given, u32 clip, const BakeHooks& hooks, co
                 run.locals.push_back(n < pose.local.size() ? pose.local[n] : Transform{});
             }
             run.switches.insert(run.switches.end(), now.begin(), now.end());
-            run.times.push_back(static_cast<f32>(static_cast<i64>(piece.step + k) - static_cast<i64>(run.first)) * dt);
+            // The clip's own steps to the step; a lead-in's by the run's clock.
+            run.times.push_back(piece.step >= run.first
+                                    ? static_cast<f32>(piece.step + k - run.first) * dt
+                                    : mix.worldSeconds - starts[baking]);
             run.localTimes.push_back(local);
             previous = now;
-            travel = travel + forward * (speed * dt);
+            travel = travel + forward * (speed * piece.dt);
             if (progress != nullptr) {
                 ++progress->step;
             }
@@ -969,8 +1043,8 @@ BakeRun SimulateClip(const Document& given, u32 clip, const BakeHooks& hooks, co
     // How settled: each preheat loop against the one before, at the same time.
     const Piece& lead = pieces.front();
     if (lead.kind == Piece::Kind::Loops && !run.nodes.empty()) {
-        const u32 cycle = lead.clip == clip ? run.steps : stepsOf(document.clips[lead.clip].duration);
-        const u32 loopsRun = lead.clip == clip ? preheat + 1 : std::max<u32>(1, preheat);
+        const u32 cycle = lead.clip == clip ? run.steps : stepsOf(document.clips[lead.clip].duration, lead.dt);
+        const u32 loopsRun = lead.clip == clip ? preheat + 1 : leadLoops;
         for (u32 l = 1; l < loopsRun; ++l) {
             f32 worst = 0.0f;
             for (u32 k = 0; k < cycle; ++k) {

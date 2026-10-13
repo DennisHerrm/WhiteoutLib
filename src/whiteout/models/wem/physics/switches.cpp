@@ -123,6 +123,23 @@ bool DefaultDropped(const Document& document, u32 clip, const PhysicsRig& rig, u
     return false;
 }
 
+/// Whether body @p id's own switch is on at the end of @p clip, a lead-in: by
+/// its key there or, in a corpse's clip that keys none, as the clip it
+/// continues ends.
+bool EndsDynamic(const Document& document, u32 clip, u32 id, u32 depth) {
+    if (clip >= document.clips.size() || depth > kMaxChain) {
+        return false;
+    }
+    const Clip& owner = document.clips[clip];
+    const Model& model = document.models[owner.model];
+    if (const SubTrack* track = Keyed(&owner, FindPhysicsChannel(model, id, Channel::PhysicsDynamic))) {
+        return Sample(owner, *track, owner.duration, 0.0f, true) >= 0.5f;
+    }
+    const BakeLeadIn from = BakeComesFrom(document, clip);
+    return IsCorpseClipName(owner.name) && from.kind == BakeFrom::Clip && from.clip != clip &&
+           EndsDynamic(document, from.clip, id, depth + 1);
+}
+
 /// The model's first looping clip whose base name is @p base.
 u32 FirstLoopNamed(const Document& document, u32 model, std::string_view base) {
     for (u32 c = 0; c < document.clips.size(); ++c) {
@@ -209,6 +226,14 @@ SwitchReader::SwitchReader(const Document& document, u32 model, u32 clip, Switch
                    return c.model == model && Keyed(&c, channel) != nullptr;
                });
     };
+    // A corpse's clip continues its death (§4.3), under the rule a drop
+    // carries by: set up, or in a set-up clip's lead-in.
+    u32 continues = kInvalidIndex;
+    if (clip_ != nullptr && IsCorpseClipName(clip_->name) && (chained || IsSetUp(*clip_))) {
+        if (const BakeLeadIn from = BakeComesFrom(document, clip); from.kind == BakeFrom::Clip && from.clip != clip) {
+            continues = from.clip;
+        }
+    }
     bodies_.resize(physics.bodies.size());
     for (u32 b = 0; b < physics.bodies.size(); ++b) {
         const PhysicsBody& body = physics.bodies[b];
@@ -231,6 +256,9 @@ SwitchReader::SwitchReader(const Document& document, u32 model, u32 clip, Switch
         out.inherit = body.inheritDynamic;
         out.dynamic = Keyed(clip_, FindPhysicsChannel(owner, body.id, Channel::PhysicsDynamic));
         out.blend = Keyed(clip_, FindPhysicsChannel(owner, body.id, Channel::PhysicsBlend));
+        // What the death let go of by a key of its own lies where it fell.
+        out.carried = out.dynamic == nullptr && continues != kInvalidIndex &&
+                      EndsDynamic(document, continues, body.id, 0);
         for (u32 at = body.node < tree.size() ? tree.nodes[body.node].parent : kInvalidNode;
              at < tree.size() && out.ancestor == kInvalidIndex; at = tree.nodes[at].parent) {
             for (u32 k = 0; k < physics.bodies.size(); ++k) {
@@ -339,7 +367,10 @@ void SwitchReader::read(f32 seconds, std::span<const BodySwitch> previous, std::
             own = sample(body.dynamic, seconds, 0.0f, true) >= 0.5f;
             ownWhy = SwitchWhy::Keyed;
         } else {
-            own = body.rest;
+            own = body.rest || body.carried;
+            if (!body.rest && body.carried) {
+                ownWhy = SwitchWhy::Carried;
+            }
         }
         const bool forced = dropper != kInvalidIndex;
         now.active = forced || own;
@@ -390,6 +421,10 @@ std::string BaseSequenceName(std::string_view name) {
 
 bool IsDecayClipName(std::string_view name) {
     return NamedWord(name, "decay");
+}
+
+bool IsCorpseClipName(std::string_view name) {
+    return IsDecayClipName(name) || NamedWord(name, "dissipate");
 }
 
 bool PlaysOnce(std::string_view name) {
@@ -449,10 +484,10 @@ BakeLeadIn BakeComesFrom(const Document& document, u32 clip) {
         found = FindClipNamed(document, owner.model, owner.physics->comesFromClip);
     } else {
         // A corpse continues its death: Decay Bone after Decay Flesh, and
-        // Decay Flesh, or a lone Decay, after the first Death.
+        // Decay Flesh, a lone Decay or a hero's Dissipate after the first Death.
         const std::vector<std::string> words = Words(BaseSequenceName(owner.name));
-        if (IsDecayClipName(owner.name)) {
-            if (words.size() > 1 && words[1] == "bone") {
+        if (IsCorpseClipName(owner.name)) {
+            if (IsDecayClipName(owner.name) && words.size() > 1 && words[1] == "bone") {
                 for (u32 c = 0; c < document.clips.size() && found == kInvalidIndex; ++c) {
                     const std::vector<std::string> other = Words(BaseSequenceName(document.clips[c].name));
                     if (document.clips[c].model == owner.model && c != clip && other.size() > 1 &&

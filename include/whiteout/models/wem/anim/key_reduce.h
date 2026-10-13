@@ -60,6 +60,16 @@ struct ExactKeyReport {
  */
 ExactKeyReport ReduceKeysExactly(Document& document, u32 model);
 
+/**
+ * @brief Step 2 of `ReduceKeysExactly` alone: the sub-tracks that play, every
+ *        millisecond, the rest their clip shows without them.
+ *
+ * What a file export runs on its own copy: a track that only restates its
+ * record's static value is what deleting a clip, or the keys that moved, leaves
+ * behind. Every other key is written as it stands.
+ */
+ExactKeyReport DropRestTracks(Document& document, u32 model);
+
 // ============================================================================
 // Tier 2: within a tolerance
 // ============================================================================

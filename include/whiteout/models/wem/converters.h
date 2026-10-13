@@ -243,6 +243,19 @@ u32 MdxFileVersion(ProfileId profile);
 /// name an id the file never writes.
 u32 RetireNodesUnwritableAt(Document& document, u32 version, Diagnostics& out);
 
+/// Whether @p document holds an event object no clip fires.
+bool CarriesUnfiredEvents(const Document& document);
+
+/// Takes out of @p document, for an `.mdx` FILE, every event object no clip
+/// fires: what deleting the animations it fired in leaves behind. Its record
+/// would be a node with no `KEVT` time, which fires nothing. One that a node
+/// hangs from, or that anything else names, stays as its placement, a helper.
+/// One note says how many went. Returns that count, helpers included.
+///
+/// For a file only, as `RetireNodesUnwritableAt` is: an editor's view keeps the
+/// node, which is where its next key goes.
+u32 DropUnfiredEvents(Document& document, Diagnostics& out);
+
 /**
  * @brief Warcraft III `.mdx`, both directions, serving both WC3 profiles.
  *

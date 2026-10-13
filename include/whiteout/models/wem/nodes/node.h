@@ -449,6 +449,9 @@ enum class EventCategory : u8 {
 std::string_view EventCategoryTag(EventCategory category);
 
 struct EventPayload {
+    /// World of Warcraft's event identifier. From a Warcraft III file, the
+    /// global sequence it named, as read: the one written is the global loop
+    /// the event's times are keyed in.
     u32 id = 0;
 
     /// What the event does and which row of that table it names (`NODE` v19),

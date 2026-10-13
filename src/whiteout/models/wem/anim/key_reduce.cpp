@@ -180,7 +180,17 @@ void DropRests(Document& document, u32 model, Game storage, ExactKeyReport& repo
     std::set<std::tuple<u32, u32, u32>> dropped;
     for (const auto& [id, refs] : RefsOf(document, model)) {
         const AnimChannel* channel = owner.animChannels.find(id);
-        if (channel == nullptr || Untouchable(document, model, *channel) || !Agree(document, refs)) {
+        if (channel == nullptr || Untouchable(document, model, *channel)) {
+            continue;
+        }
+        // Clips that disagree on the interpolation are still written as one
+        // track, under the one a clip of them names (§1.3), so dropping some
+        // can change how the others are written. All of them may go, where
+        // each is a hold or a line: a constant reads the same as either.
+        const bool agree = Agree(document, refs);
+        if (!agree && !std::all_of(refs.begin(), refs.end(), [&](const Ref& ref) {
+                return ValuesPerKey(At(document, ref).interp) == 1;
+            })) {
             continue;
         }
         const TrackRests rests = RestsPlayed(document, model, *channel, storage);
@@ -209,6 +219,9 @@ void DropRests(Document& document, u32 model, Game storage, ExactKeyReport& repo
             for (const Ref& ref : refs) {
                 dropped.insert({ref.clip, ref.container, ref.track});
             }
+            continue;
+        }
+        if (!agree) {
             continue;
         }
         // The channel stays keyed through the clip that sets its clock.
@@ -436,7 +449,25 @@ void DropUnkeyed(Document& document, u32 model, ExactKeyReport& report) {
     report.channelsDropped += static_cast<u32>(dead.size());
 }
 
+/// Step 2, where the storage's rests are known. WoW's and Diablo III's writers
+/// fill a clip that keys nothing with rests of their own, which the design has
+/// not audited.
+void DropRestsOfStorage(Document& document, u32 model, ExactKeyReport& report) {
+    const Game storage = GameOf(document.defaultProfile);
+    if (storage == Game::Warcraft || storage == Game::StarCraft) {
+        DropRests(document, model, storage, report);
+    }
+}
+
 } // namespace
+
+ExactKeyReport DropRestTracks(Document& document, u32 model) {
+    ExactKeyReport report;
+    if (model < document.models.size()) {
+        DropRestsOfStorage(document, model, report);
+    }
+    return report;
+}
 
 ExactKeyReport ReduceKeysExactly(Document& document, u32 model) {
     ExactKeyReport report;
@@ -444,12 +475,7 @@ ExactKeyReport ReduceKeysExactly(Document& document, u32 model) {
         return report;
     }
     DropUnread(document, model, {}, {}, report);
-    // WoW's and Diablo III's writers fill a clip that keys nothing with rests
-    // of their own, which the design has not audited.
-    const Game storage = GameOf(document.defaultProfile);
-    if (storage == Game::Warcraft || storage == Game::StarCraft) {
-        DropRests(document, model, storage, report);
-    }
+    DropRestsOfStorage(document, model, report);
     CollapseConstants(document, model, {}, {}, report);
     DropReproduced(document, model, report);
     DropUnkeyed(document, model, report);

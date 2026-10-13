@@ -775,15 +775,54 @@ struct Camera {
  * @brief Collision volume for physics
  *
  * Collision shapes define simplified geometry for collision detection.
+ *
+ * What each type holds here, and what `CLID` stores for it (Warcraft III 3.0's
+ * `MDL::ReadBinCollisions`, the same at every version):
+ * - Box: two corners. 24 bytes.
+ * - Cylinder: `vertices` is its base and its top, which stands straight above
+ *   the base on Z; the file stores the base, the height and the radius. 20.
+ * - Sphere: its centre, and the radius. 16.
+ * - Plane: two corners whose X span is its length and Y span its width, which
+ *   are the two numbers the file stores. 8.
  */
 struct CollisionShape {
+    /// The enumerators' values are this library's, not the file's: `CLID`
+    /// numbers a cylinder 1 and a plane 3 (`collisionShapeFileType`).
     /// @bind
     enum class ShapeType : u32 { Box = 0, Plane = 1, Sphere = 2, Cylinder = 3 };
     Node node;                       ///< Base node data
     ShapeType type = ShapeType::Box; ///< Shape type
-    std::vector<Vector3f> vertices;  ///< Shape vertices (box only)
+    std::vector<Vector3f> vertices;  ///< Shape vertices (see the type list above)
     f32 radius = 0.0f;               ///< Radius (sphere/cylinder only)
 };
+
+/// The number `CLID` stores for @p type: 0 box, 1 cylinder, 2 sphere, 3 plane.
+constexpr u32 collisionShapeFileType(CollisionShape::ShapeType type) {
+    switch (type) {
+    case CollisionShape::ShapeType::Cylinder:
+        return 1;
+    case CollisionShape::ShapeType::Sphere:
+        return 2;
+    case CollisionShape::ShapeType::Plane:
+        return 3;
+    case CollisionShape::ShapeType::Box:
+        break;
+    }
+    return 0;
+}
+
+/// The type `CLID` means by @p fileType, and whether it means one at all: the
+/// game reads no bytes for a number past 3 and goes on to the next shape.
+constexpr bool collisionShapeTypeOfFile(u32 fileType, CollisionShape::ShapeType& type) {
+    constexpr CollisionShape::ShapeType kByFileType[] = {
+        CollisionShape::ShapeType::Box, CollisionShape::ShapeType::Cylinder,
+        CollisionShape::ShapeType::Sphere, CollisionShape::ShapeType::Plane};
+    if (fileType >= 4) {
+        return false;
+    }
+    type = kByFileType[fileType];
+    return true;
+}
 
 // ============================================================================
 // Face Effect (Reforged)

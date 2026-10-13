@@ -141,9 +141,9 @@ struct Context {
     u32 stockTexture(const std::string& path, u32 replaceableId = 0) const;
 };
 
-/// Warcraft III's neutral for one Reforged HD slot, as shipped content spells
-/// it — see @ref Context::stockTexture. `replaceableId` is non-zero only for the
-/// team colour, which no file backs.
+/// Warcraft III's neutral for one Reforged HD slot — see
+/// @ref Context::stockTexture. Named `.dds`, the container an HD texture is.
+/// `replaceableId` is non-zero only for the team colour, which no file backs.
 struct StockSlotTexture {
     const char* path = "";
     u32 replaceableId = 0;
@@ -151,6 +151,12 @@ struct StockSlotTexture {
 
 /// The stock neutral for @p slot. Empty for a slot Warcraft III has none for.
 StockSlotTexture StockTextureFor(mdx::Layer::SlotType slot);
+
+/// @p path as a Reforged file names it: the stock neutral of an HD-only slot
+/// under another extension (a shipped model's `Textures/Black32.blp`) comes
+/// back spelled as @ref StockTextureFor spells it, and any other path as it
+/// was -- `Textures/white` among them, which classic layers name too.
+std::string StockSpelling(const std::string& path);
 
 /// Whether @p layer of @p material shades as Reforged HD: the `HD` or `Crystal`
 /// shader. See the file comment: this is not `layer.is_hd`, because nothing sets

@@ -185,6 +185,37 @@ TEST_CASE("wem mdx a mesh of several sections writes a geoset each",
     }
 }
 
+TEST_CASE("wem mdx the blank material names its texture where the version reads it",
+          "[wem][convert][mdx][materials]") {
+    // A section with no material is drawn with a blank one, whose layer names
+    // a texture with no file. From v1100 the game reads a layer's textures off
+    // its list alone, so the legacy field there was a layer with NO texture,
+    // and a texture nothing read.
+    Document document = makeSectionedDocument(2);
+    document.models.front().meshes.front().sections[1].materialSlot = kInvalidIndex;
+    const MdxConverter converter;
+
+    const Result<mdx::Model> classic = converter.toMdx(document, ProfileId::Wc3Classic, 800);
+    REQUIRE(classic.ok());
+    REQUIRE(classic->materials.size() == 3);
+    CHECK(classic->geosets.at(1).materialId == 2u);
+    const u32 blank = static_cast<u32>(classic->textures.size() - 1);
+    CHECK(classic->textures[blank].fileName.empty());
+    REQUIRE(classic->materials[2].layers.size() == 1);
+    CHECK(classic->materials[2].layers[0].textureId == blank);
+    CHECK(classic->materials[2].layers[0].subTextures.empty());
+
+    const Result<mdx::Model> later = converter.toMdx(document, ProfileId::Wc3Classic, 1800);
+    REQUIRE(later.ok());
+    REQUIRE(later->materials.size() == 3);
+    REQUIRE(later->materials[2].layers.size() == 1);
+    const mdx::Layer& layer = later->materials[2].layers[0];
+    REQUIRE(layer.subTextures.size() == 1);
+    CHECK(layer.subTextures[0].textureId == static_cast<u32>(later->textures.size() - 1));
+    CHECK(layer.subTextures[0].slot == mdx::Layer::SlotType::DiffuseMap);
+    CHECK(later->textures.back().fileName.empty());
+}
+
 TEST_CASE("wem mdx writes no inheritance a node did not claim", "[wem][convert][mdx][nodes]") {
     Document document = makeSectionedDocument(2);
     // What every `.m3` and most `.m2` bones carry: nothing. Warcraft III honours
@@ -443,6 +474,57 @@ TEST_CASE("wem mdx numbers object ids by chunk, not by node order",
     CHECK(second.matrixIndices[0] == 1);
 }
 
+TEST_CASE("wem mdx an emitter that only names a system is written as a helper",
+          "[wem][convert][mdx][nodes]") {
+    // A Diablo III bone's particle and an M2 ribbon are a placement and a
+    // reference to a system WEM does not hold. They were written as a `PRE2`
+    // whose texture and a `RIBB` whose material was that reference's id -- two
+    // indices Warcraft III follows unchecked, one of them 300,000 here.
+    Document document = makeSectionedDocument(2);
+    Model& model = document.models.front();
+    const u32 before = model.nodes.size();
+    const auto add = [&model](const char* name, NodeKind kind, u32 parent) {
+        Node node;
+        node.name = name;
+        node.kind = kind;
+        node.resetPayloadForKind();
+        node.parent = parent;
+        model.nodes.add(std::move(node));
+        return model.nodes.size() - 1;
+    };
+    const u32 dust = add("dust", NodeKind::ParticleEmitter, 0);
+    std::get<ParticlePayload>(model.nodes.nodes[dust].payload).system.id = 300000;
+    const u32 trail = add("trail", NodeKind::RibbonEmitter, 0);
+    std::get<RibbonPayload>(model.nodes.nodes[trail].payload).system.id = 77;
+    add("under the dust", NodeKind::Helper, dust);
+    REQUIRE(model.nodes.size() == before + 3);
+
+    const MdxConverter converter;
+    Result<mdx::Model> exported = converter.toMdx(document, ProfileId::Wc3Classic, 800);
+    REQUIRE(exported.ok());
+    CHECK(exported->particleEmitters2.empty());
+    CHECK(exported->ribbonEmitters.empty());
+    REQUIRE(exported->helpers.size() == 3);
+    const auto named = [&](const char* name) -> const mdx::Node& {
+        for (const mdx::Helper& helper : exported->helpers) {
+            if (helper.node.name == name) {
+                return helper.node;
+            }
+        }
+        FAIL("no helper named " << name);
+        return exported->helpers.front().node;
+    };
+    // Each keeps its place and what hangs from it.
+    CHECK(named("dust").parentId == exported->bones[0].node.objectId);
+    CHECK(named("trail").parentId == exported->bones[0].node.objectId);
+    CHECK(named("under the dust").parentId == named("dust").objectId);
+    // Said once a kind, and the map numbers them as the helpers they are.
+    CHECK(exported.diagnostics.countOf(DiagCode::NodeKindNotCarried) == 2u);
+    const MdxExportMap map = MdxExportMapOf(document, 0, ProfileId::Wc3Classic);
+    CHECK(map.nodeObjectId[dust] == named("dust").objectId);
+    CHECK(map.nodeObjectId[trail] == named("trail").objectId);
+}
+
 TEST_CASE("wem mdx attachment ids climb through the file", "[wem][convert][mdx][nodes]") {
     // What a file's ids come back as, in the file's order.
     const auto written = [](std::vector<u32> ids) {
@@ -460,6 +542,9 @@ TEST_CASE("wem mdx attachment ids climb through the file", "[wem][convert][mdx][
         REQUIRE(imported.ok());
         Result<mdx::Model> exported = converter.toMdx(*imported, ProfileId::Wc3Classic, 800);
         REQUIRE(exported.ok());
+        // The loader's rule, kept with the others (`mdx::makeLoadable`).
+        Diagnostics said;
+        FinishMdxExport(*exported, said);
         ids.clear();
         for (const mdx::Attachment& attachment : exported->attachments) {
             ids.push_back(attachment.attachmentId);
@@ -478,11 +563,10 @@ TEST_CASE("wem mdx attachment ids climb through the file", "[wem][convert][mdx][
 
 TEST_CASE("wem mdx a cylinder and a plane keep their two vertices",
           "[wem][convert][mdx][nodes]") {
-    // `CLID` stores two vertices for a box, a plane and a cylinder, and a
-    // reader takes them by the shape's type rather than by a count. Import read
-    // both into the box's corners and export wrote them only for a box, so a
-    // cylinder came back with its radius and no ends, and the chunk after it
-    // misparsed.
+    // In memory a cylinder is its two end centres and a plane its two corners
+    // (`mdx::CollisionShape`), which import reads into the box's corners.
+    // Export once wrote them only for a box, so a cylinder came back with its
+    // radius and no ends.
     mdx::Model source = makeModel();
     mdx::CollisionShape cylinder;
     cylinder.node = makeNode("Collision Cylinder01", 2, mdx::Node::NO_PARENT);
@@ -512,6 +596,45 @@ TEST_CASE("wem mdx a cylinder and a plane keep their two vertices",
         CHECK(shape.vertices[1] == from.vertices[1]);
     }
     CHECK(exported->collisionShapes[0].radius == 3.0f);
+}
+
+TEST_CASE("wem mdx a cylinder stands on Z or is written as the box around it",
+          "[wem][convert][mdx][nodes]") {
+    // `CLID` holds a cylinder's base, height and radius, and the game builds
+    // the top straight above the base: no other axis can be said.
+    const auto written = [](Vector3f from, Vector3f to, f32 radius, bool& warned) {
+        mdx::Model source = makeModel();
+        mdx::CollisionShape cylinder;
+        cylinder.node = makeNode("Collision Cylinder01", 2, mdx::Node::NO_PARENT);
+        cylinder.type = mdx::CollisionShape::ShapeType::Cylinder;
+        cylinder.vertices = {from, to};
+        cylinder.radius = radius;
+        source.collisionShapes = {cylinder};
+        source.pivotPoints.push_back(Vector3f{0, 0, 0});
+        const MdxConverter converter;
+        Result<Document> imported = converter.fromMdx(source);
+        REQUIRE(imported.ok());
+        Result<mdx::Model> exported = converter.toMdx(*imported, ProfileId::Wc3Classic, 800);
+        REQUIRE(exported.ok());
+        REQUIRE(exported->collisionShapes.size() == 1);
+        warned = !exported.diagnostics.byCode(DiagCode::FeatureDropped).empty();
+        return exported->collisionShapes[0];
+    };
+    using Type = mdx::CollisionShape::ShapeType;
+    bool warned = false;
+
+    // Drawn downwards: the lower end is the base.
+    mdx::CollisionShape shape = written(Vector3f{1, 2, 30}, Vector3f{1, 2, -10}, 4.0f, warned);
+    CHECK(shape.type == Type::Cylinder);
+    CHECK(shape.vertices == std::vector<Vector3f>{Vector3f{1, 2, -10}, Vector3f{1, 2, 30}});
+    CHECK(shape.radius == 4.0f);
+    CHECK_FALSE(warned);
+
+    // Along X: the box that holds it, and a word about it.
+    shape = written(Vector3f{0, 0, 0}, Vector3f{20, 0, 0}, 4.0f, warned);
+    CHECK(shape.type == Type::Box);
+    CHECK(shape.vertices == std::vector<Vector3f>{Vector3f{0, -4, -4}, Vector3f{20, 4, 4}});
+    CHECK(warned);
 }
 
 TEST_CASE("wem mdx a camera keeps where it looks", "[wem][convert][mdx][nodes]") {
@@ -1455,9 +1578,12 @@ TEST_CASE("wem mdx DropShadow and the unnamed flag bits survive", "[wem][convert
     REQUIRE(exported.ok());
     REQUIRE(recordFor(*exported, 2) != nullptr);
     CHECK(static_cast<u32>(recordFor(*exported, 2)->flags) == 0x1Bu);
-    // A record whose only content was its flags word comes back with it.
-    REQUIRE(recordFor(*exported, 3) != nullptr);
-    CHECK(static_cast<u32>(recordFor(*exported, 3)->flags) == 0u);
+    // A record whose only content was its flags word is not written: the game
+    // reads one bit of the word, `DropShadow`, and reads it through a bone,
+    // so such a record states nothing. The word stays on the section, and is
+    // written whenever the record is there for another reason.
+    CHECK(recordFor(*exported, 3) == nullptr);
+    REQUIRE(imported->models[0].meshes[3].sections[0].native.find("geosetAnimFlags") != nullptr);
     CHECK(static_cast<u32>(recordFor(*exported, 0)->flags) == 0x2u);
     CHECK(recordFor(*exported, 0)->alpha == 0.5f);
     CHECK(recordFor(*exported, 2)->color == Vector3f(0.5f, 0.25f, 1.0f));

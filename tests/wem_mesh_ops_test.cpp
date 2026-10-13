@@ -674,9 +674,11 @@ TEST_CASE("wem checkGeoset says what toMdx says about the limits", "[wem][mesh][
         }
     }
     // And each fixture trips the limit it is named for.
-    CHECK(converter.checkGeoset(limitDocument("wide"), 0, limitDocument("wide").models[0].meshes[0],
-                                ProfileId::Wc3Classic, 800)
-              .countOf(DiagCode::IndexWidthExceeded) == 1u);
+    const Diagnostics wide = converter.checkGeoset(
+        limitDocument("wide"), 0, limitDocument("wide").models[0].meshes[0], ProfileId::Wc3Classic, 800);
+    CHECK(wide.countOf(DiagCode::IndexWidthExceeded) == 1u);
+    // Said, not refused: the section is written, as two geosets.
+    CHECK_FALSE(wide.hasErrors());
     const Document sets = limitDocument("sets");
     CHECK(converter.checkGeoset(sets, 0, sets.models[0].meshes[0], ProfileId::Wc3Classic, 800)
               .countOf(DiagCode::BonePaletteLimit) == 1u);
@@ -686,6 +688,142 @@ TEST_CASE("wem checkGeoset says what toMdx says about the limits", "[wem][mesh][
     CHECK(converter
               .checkGeoset(palette, 0, palette.models[0].meshes[0], ProfileId::Wc3Classic, 1000)
               .countOf(DiagCode::BonePaletteLimit) == 1u);
+}
+
+// ---------------------------------------------------------------------------
+// A section past one geoset's vertices
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// A zigzag strip of @p vertices welded vertices and two fewer triangles, in
+/// one section, added to @p model as a mesh bound to its first node.
+void addStrip(Model& model, u32 vertices) {
+    geom::MeshBuilder builder;
+    MeshSection section;
+    section.name = "strip";
+    section.profiles = ProfileBit(ProfileId::Wc3Classic);
+    section.materialSlot = 0;
+    builder.addSection(std::move(section));
+    for (u32 v = 0; v < vertices; ++v) {
+        const geom::VertexId id = builder.addVertex(
+            Vector3f{static_cast<f32>(v / 2), static_cast<f32>(v % 2), 0.0f});
+        builder.addInfluence(id, 0, 1.0f);
+    }
+    for (u32 v = 0; v + 2 < vertices; ++v) {
+        // Wound alternately, so two neighbours cross their shared edge in
+        // opposite directions and no vertex is split.
+        const u32 a = v % 2 == 0 ? v : v + 1;
+        const u32 b = v % 2 == 0 ? v + 1 : v;
+        const geom::FaceId face =
+            builder.addTriangle(geom::VertexId(a), geom::VertexId(b), geom::VertexId(v + 2), 0);
+        for (u32 corner = 0; corner < 3; ++corner) {
+            builder.setCornerAttr(face, corner, geom::names::kNormal, Vector3f{0, 0, 1});
+            builder.setCornerAttr(face, corner, geom::names::uv(0), Vector2f{0, 0});
+        }
+    }
+    model.meshes.push_back(std::move(builder.build().mesh));
+}
+
+/// A classic document of one bone and one material slot, with a strip of each
+/// of @p strips' vertex counts.
+Document stripDocument(std::initializer_list<u32> strips) {
+    Document document = limitDocument("palette");
+    Model& model = document.models[0];
+    model.meshes.clear();
+    model.nodes.nodes.resize(1);
+    for (const u32 vertices : strips) {
+        addStrip(model, vertices);
+    }
+    return document;
+}
+
+} // namespace
+
+TEST_CASE("wem mdx a section past one geoset's vertices is written as several",
+          "[wem][mesh][mdx][width]") {
+    // Warcraft III builds no geoset of more than 65,535 vertices and reads
+    // through the null one it gets instead. The indices used to be wrapped to
+    // sixteen bits, which is a geoset of garbage in the viewer too.
+    const MdxConverter converter;
+    const auto exportOf = [&](const Document& document) {
+        Result<mdx::Model> exported = converter.toMdx(document, ProfileId::Wc3Classic, 800);
+        REQUIRE(exported.ok());
+        for (const mdx::Geoset& geoset : exported->geosets) {
+            REQUIRE(geoset.vertexPositions.size() <= 65535u);
+            for (const u16 index : geoset.faces) {
+                REQUIRE(index < geoset.vertexPositions.size());
+            }
+        }
+        return exported;
+    };
+
+    SECTION("65,535 vertices are one geoset, and one more is two") {
+        const Result<mdx::Model> fits = exportOf(stripDocument({65535u}));
+        REQUIRE(fits->geosets.size() == 1);
+        CHECK(fits->geosets[0].vertexPositions.size() == 65535u);
+        CHECK(fits.diagnostics.countOf(DiagCode::IndexWidthExceeded) == 0u);
+
+        const Result<mdx::Model> cut = exportOf(stripDocument({65536u}));
+        REQUIRE(cut->geosets.size() == 2);
+        // In whole triangles and in face order: the last triangle did not fit,
+        // and takes its three vertices with it.
+        CHECK(cut->geosets[0].vertexPositions.size() == 65535u);
+        CHECK(cut->geosets[0].faces.size() == 65533u * 3u);
+        CHECK(cut->geosets[1].vertexPositions.size() == 3u);
+        CHECK(cut->geosets[1].faces.size() == 3u);
+        CHECK(cut.diagnostics.countOf(DiagCode::IndexWidthExceeded) == 1u);
+        CHECK_FALSE(cut.diagnostics.hasErrors());
+    }
+
+    SECTION("the further pieces come after every other geoset") {
+        // A wide mesh, then a small one: the small one keeps the number it
+        // would have had, which is what a host marks geosets through.
+        const Document document = stripDocument({70000u, 4u});
+        const Result<mdx::Model> exported = exportOf(document);
+        REQUIRE(exported->geosets.size() == 3);
+        CHECK(exported->geosets[1].vertexPositions.size() == 4u);
+        CHECK(exported->geosets[0].vertexPositions.size() == 65535u);
+        std::size_t triangles = 0;
+        for (const mdx::Geoset& geoset : exported->geosets) {
+            triangles += geoset.faces.size() / 3;
+            CHECK(geoset.materialId == 0u);
+            CHECK(geoset.vertexGroups.size() == geoset.vertexPositions.size());
+        }
+        CHECK(triangles == (70000u - 2u) + (4u - 2u));
+
+        // The map, the element lists, the skin and the check all walk the
+        // same cut, in the same order.
+        const MdxExportMap map = MdxExportMapOf(document, 0, ProfileId::Wc3Classic);
+        REQUIRE(map.geosetsOfMesh.size() == 2);
+        CHECK(map.geosetsOfMesh[0] == std::vector<u32>{0, 2});
+        CHECK(map.sectionsOfMesh[0] == std::vector<u32>{0, 0});
+        CHECK(map.geosetsOfMesh[1] == std::vector<u32>{1});
+
+        const std::vector<DrawnElements> elements =
+            MdxGeosetElements(document, 0, ProfileId::Wc3Classic);
+        REQUIRE(elements.size() == 3);
+        for (std::size_t g = 0; g < 3; ++g) {
+            CAPTURE(g);
+            CHECK(elements[g].vertices.size() == exported->geosets[g].vertexPositions.size());
+            CHECK(elements[g].triangles.size() == exported->geosets[g].faces.size());
+            CHECK(elements[g].triangleFaces.size() == exported->geosets[g].faces.size() / 3);
+        }
+
+        const WrittenSkin skin = converter.writtenSkin(document, 0, ProfileId::Wc3Classic, 0);
+        REQUIRE(skin.geosets.size() == map.geosetsOfMesh[0].size());
+        for (std::size_t k = 0; k < skin.geosets.size(); ++k) {
+            CHECK(skin.geosets[k].vertices.size() ==
+                  exported->geosets[map.geosetsOfMesh[0][k]].vertexPositions.size());
+        }
+
+        u32 written = 0;
+        const Diagnostics checked = converter.checkGeoset(document, 0, document.models[0].meshes[0],
+                                                          ProfileId::Wc3Classic, 800, &written);
+        CHECK(checked.countOf(DiagCode::IndexWidthExceeded) == 1u);
+        CHECK(written == exported->geosets[0].vertexPositions.size() +
+                             exported->geosets[2].vertexPositions.size());
+    }
 }
 
 TEST_CASE("wem checkGeoset counts the vertices the geosets hold", "[wem][mesh][merge]") {

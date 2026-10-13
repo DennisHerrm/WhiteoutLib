@@ -98,6 +98,7 @@ pre {
 | 2026-09-27 | 2.6 | How the 3.0.0 client *plays* a camera, not only how it reads one (`AnimateCamera`, `MdlReadCameras`, the cinematic player): the depth-of-field formula and its defaults, the KCVS hold, the `CAM_` filter and the shot-to-sequence pairing of in-engine cinematics. Swept all 14,984 shipped `.mdx` files: 5,217 cameras, every one variant 3; IDUF keyed on 82, all three depth-of-field tracks on 57; KCVS on none. |
 | 2026-09-27 | 2.7 | How the 3.0.0 client *frames* a camera (`CCineCamera` vs `CCamera`, `SetupWorldProjection`): the roll's sign and axis, including `CCamera`'s fixed model-X axis, and the `CAM_` field of view (horizontal over 16:9) against every other camera's (diagonal). |
 | 2026-09-13 | 2.5 | Reverse-engineered the `DILG` glider chunk end to end and closed the chunk inventory. A glider entry is a **geoset id**, and the list is a ray-intersection whitelist consumed by the client's world-picking query — it changes what a ray can hit, never what is drawn. Recorded the binary reader's store defect (every entry lands in element 0), the MDL `Glider` block, and the fact that DILG is written last. Confirmed the chunk dispatcher handles exactly 26 tags, so `DILG` is the only chunk 3.0.0 added and there is no rope, cloth or physics chunk in the format. |
+| 2026-10-13 | 2.8 | `CLID` corrected against the 3.0.0 client (`ReadBinCollisions`, `WriteBinCollisions`, `MdlReadLoadCollisionData`, `IModelTestCollisionVolumes`): type 1 is a **cylinder** of base, height and radius (20 bytes) and type 3 a **plane** of length and width (8 bytes), at every version, not the plane of two vertices and cylinder of two vertices and a radius every earlier revision and the community specification give. Added *What the Client's Loader Requires* to the implementation notes: the conditions under which the client fails a whole model or reads out of bounds, each with the function it was read from. |
 
 ## Table of Contents
 
@@ -283,7 +284,7 @@ while (totalRead < chunkSize) {
 - **Bone**: Node `inclusiveSize` + 8 bytes (geosetId + geosetAnimationId)
 - **Helper**: Node `inclusiveSize` exactly
 - **Event Object**: Node `inclusiveSize` + KEVT sub-chunk size (if present)
-- **Collision Shape**: Node `inclusiveSize` + type-dependent vertex data + optional radius
+- **Collision Shape**: Node `inclusiveSize` + 4 (type) + the type's bytes (§7.21)
 
 ---
 
@@ -1225,25 +1226,56 @@ CLID {
 
 CollisionShape {
     Node        node
-    u32         type                // See ShapeType enum
+    u32         type                // See the table below
 
-    float[vertexCount * 3] vertices // See vertex counts below
+    // type == Box (0):
+    float[3]    minimum
+    float[3]    maximum
 
-    // type == Sphere (2) or type == Cylinder (3):
+    // type == Cylinder (1):
+    float[3]    base
+    f32         height
     f32         radius
+
+    // type == Sphere (2):
+    float[3]    center
+    f32         radius
+
+    // type == Plane (3):
+    f32         length
+    f32         width
 }
 ```
 
-#### ShapeType Enum and Vertex Counts
+#### Shape Types
 
-| Value | Type | Vertex Count | Extra |
-|-------|------|-------------|-------|
-| 0 | Box | 2 | Two corners (min, max) |
-| 1 | Plane | 2 | Two corners |
-| 2 | Sphere | 1 | Center point + radius |
-| 3 | Cylinder | 2 | Two endpoints + radius |
+| Value | Type | Bytes after the type | Holds |
+|-------|------|----------------------|-------|
+| 0 | Box | 24 | Two corners (min, max) |
+| 1 | Cylinder | 20 | Base point, height, radius |
+| 2 | Sphere | 16 | Center point, radius |
+| 3 | Plane | 8 | Length, width |
 
-**Size computation:** Node `inclusiveSize` + 4 (type) + vertexCount × 12 (vertices) + optional 4 (radius if sphere or cylinder).
+This is what Warcraft III 3.0 reads (`MDL::ReadBinCollisions`) and writes, with
+no branch on the file's version. A type of 4 or more reads no bytes: the client
+goes on to the next shape, and the record it leaves is a box of no size.
+
+A cylinder stands on Z: the client builds its top as the base with the height
+added to Z, so the file cannot hold another axis. The base and a box's corners
+are offsets from the node's pivot; a sphere's center is a model-space point.
+
+The client's ray test (`IModelTestCollisionVolumes`) reads boxes, cylinders and
+spheres. It never reads a plane's two numbers: a plane counts as hit at the far
+end of every ray.
+
+> **Other tools write another layout.** The community specification, and the
+> editors built on it, number a plane 1 with two vertices (24 bytes) and a
+> cylinder 3 with two vertices and a radius (28 bytes). The client reads such a
+> chunk out of step from the first plane or cylinder on, and the model fails to
+> load. Boxes and spheres are the same in both, and no shipped file holds
+> anything else.
+
+**Size computation:** Node `inclusiveSize` + 4 (type) + the type's bytes.
 
 ### 7.22 BPOS — Bind Poses
 
@@ -1880,6 +1912,38 @@ is true forever, and a loop that measures its own progress as
 written that way turns a malformed or misread file into an infinite loop
 instead of a diagnostic. Ask the stream whether it has failed, and treat a
 negative position as "nothing remaining".
+
+### What the Client's Loader Requires
+
+Read off the 3.0.0 client. A chunk reader that fails fails the **whole model**
+(`BinToModelData`); only an unknown chunk tag is skipped. So each of these is a
+file that does not load, or one the client reads out of bounds:
+
+| Rule | Where |
+|---|---|
+| **A track has at least one key.** Every key reader answers failure for a count of 0, after reading only the count. A layer ignores the answer, so there the bytes fall out of step instead. | `ReadBinGenObject`, `ReadBinFloatKeyFrames<>`, `ReadBinLayer` |
+| **An integer track is a time and a value a key**, eight bytes, whatever its interpolation type says. Tangents written for one are read as the next keys. | `ReadBinUintKeyFrames<>` |
+| **An event object has `KEVT` with at least one time.** A count of 0 fails; with no `KEVT` at all the reader takes the next object's size for the tag, so only the chunk's last object can go without. | `ReadBinEventObjects` |
+| **Object ids are the order the node chunks are read in.** A node is numbered as it is read, in the chunk order of §3, whatever id it stores, while parents, pivots and `MATS` entries are still looked up by the stored ids. The two agree only in a file whose ids are its read order. | `ReadBinObjectEnd`, `BuildHierarchy` |
+| **A geoset holds at most 65,535 vertices.** `CreateGeoset` answers null for a count above `0xFFFF` and the caller reads through it. A geoset of no vertices builds. | `CreateGeoset`, `BuildAllGeosets` |
+| **Indices are followed unchecked**: a geoset's material, a layer's textures, a `PRE2`'s texture, a ribbon's material, a bone's geoset animation. | `BuildAllGeosets`, `ProcessTexLayers`, `ILoadParticleEmitters2`, `ILoadRibbonEmitters`, `IAnimCreateObjects` |
+| **A geoset animation names a geoset the model has.** The animation table is grown to the id. | `AnimAddGeoset` |
+| **Attachment ids climb through `ATCH`.** The id table is sized by the last record's id and filled by every record's. | `ProcessAttachments` |
+| **An emitter's rate and lifespan are not negative**, static or keyed: the particle pool is sized by their product, cast to unsigned. | `CParticleEmitter2::SyncAllocation` |
+| **`CLID` is the layout of §7.21**, which is not the community's for a cylinder or a plane. | `ReadBinCollisions` |
+| **At most 255 sequences.** They are counted in a byte. | |
+
+Two more are not failures, and are worth knowing when writing a file:
+
+- **Key times are compared signed**, and a sequence takes one unbroken run of
+  keys: `SetSequenceIndices` skips the keys before the sequence's start, then
+  counts keys up to its end. A key out of time order ends the run, so the keys
+  after it never play.
+- **A bone's link to a geoset animation is kept in a byte**, 255 for none, and
+  only on a bone whose `geosetId` is not -1. A record past 254 cannot be linked.
+
+This library's writer checks all of the above before it writes
+(`mdx::makeLoadable`), on a copy, unless told to write the model as given.
 
 ### Geoset Sub-Chunk Tag-Size Pairs
 

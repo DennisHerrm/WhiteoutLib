@@ -25,6 +25,7 @@
 #include <memory>
 #include <string>
 #include "../../compatibility.h"
+#include "loadable.h"
 #include "parser.h"
 #include "structures.h"
 #include "types.h"
@@ -77,6 +78,13 @@ enum class MdlFormat {
  * The format is selected either by file extension (.mdl → text, .mdx → binary)
  * or by an explicit MDLXFormat parameter.
  *
+ * What is written is the model made loadable (`makeLoadable`): a model built
+ * by hand, converted, or read from a file another tool wrote can hold what
+ * Warcraft III fails a whole model on, and no route to a file should be able
+ * to skip the check. The caller's model is never changed -- the repairs are
+ * made on a copy -- and `lastReport` says what they were. `setRepairs(false)`
+ * writes the model exactly as given, for a tool that is after the bytes.
+ *
  * Uses the PImpl (Pointer to Implementation) idiom to hide implementation details.
  */
 /// @bind methods, js_name=MdxWriter
@@ -113,6 +121,21 @@ public:
      */
     std::vector<u8> write(const Model& mdx, MDLXFormat format = MDLXFormat::MDX,
                           MdlFormat mdlFormat = MdlFormat::WarcraftIII);
+
+    /// Whether `write` first makes the model loadable. On unless turned off.
+    /// @bind skip
+    void setRepairs(bool repairs);
+
+    /// What the last `write` had to repair, and what it found and left. Empty
+    /// when the model went out as given.
+    /// @bind skip
+    const LoadReport& lastReport() const;
+
+    /// The bytes of @p material's record in the `MTLS` of a file of
+    /// @p version. Two materials state the same thing exactly when these are
+    /// equal, which is how the export tells a duplicate (`prune.h`).
+    /// @bind skip
+    static std::vector<u8> materialRecord(const Material& material, u32 version);
 
 private:
     class Impl;

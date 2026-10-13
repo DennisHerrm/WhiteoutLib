@@ -30,7 +30,9 @@
  * @endcode
  */
 
+#include "loadable.h"
 #include "parser.h"
+#include "prune.h"
 #include "structures.h"
 #include "types.h"
 #include "writer.h"

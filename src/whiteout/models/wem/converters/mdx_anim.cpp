@@ -7,9 +7,11 @@
 #include <cmath>
 #include <cstring>
 #include <deque>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 #include <whiteout/models/wem/anim/clip.h>
@@ -23,17 +25,81 @@ namespace models {
 namespace wem {
 namespace mdx_anim {
 
+// A default-constructed extent is all zeros, and `Extent::valid()` answers
+// "min <= max", which all zeros satisfies — so the question a caller means by
+// "did the source give me one" is volume, not validity. Nor is a box inside
+// out one (a file's sentinel for "none" is FLT_MAX in the minimum), nor one
+// holding a NaN: written on, each reaches the game as a bound it culls by.
+bool HasExtent(const Extent& extent) {
+    const f32 values[] = {extent.sphereRadius, extent.minimum.x, extent.minimum.y, extent.minimum.z,
+                          extent.maximum.x,    extent.maximum.y, extent.maximum.z};
+    if (!std::all_of(std::begin(values), std::end(values),
+                     [](f32 value) { return std::isfinite(value); }) ||
+        extent.minimum.x > extent.maximum.x || extent.minimum.y > extent.maximum.y ||
+        extent.minimum.z > extent.maximum.z) {
+        return false;
+    }
+    return extent.sphereRadius > 0.0f || extent.maximum.x > extent.minimum.x ||
+           extent.maximum.y > extent.minimum.y || extent.maximum.z > extent.minimum.z;
+}
+
 namespace {
 
 constexpr u32 kNoGlobalSequence = mdx::Track<f32>::kNoGlobalSequence;
 
-/// Whether an extent says anything. A default-constructed one is all zeros, and
-/// `Extent::valid()` answers "min <= max", which all zeros satisfies — so the
-/// question a caller means by "did the source give me one" is volume, not
-/// validity.
-bool HasExtent(const Extent& extent) {
-    return extent.sphereRadius > 0.0f || extent.maximum.x > extent.minimum.x ||
-           extent.maximum.y > extent.minimum.y || extent.maximum.z > extent.minimum.z;
+/// Whether every float of @p value is a number: a key's value is a float, a
+/// vector or a quaternion, each a run of floats.
+template <class T>
+bool FiniteValue(const T& value) {
+    f32 floats[sizeof(T) / sizeof(f32)];
+    std::memcpy(floats, &value, sizeof(floats));
+    return std::all_of(std::begin(floats), std::end(floats),
+                       [](f32 f) { return std::isfinite(f); });
+}
+
+/// @p track without the keys that hold a NaN or an infinity, in a value or a
+/// tangent: built in @p scratch, and @p track itself when every key is a
+/// number. @p dropped counts the keys left out.
+template <class T>
+const mdx::Track<T>& FiniteKeys(const mdx::Track<T>& track, u32 perKey, mdx::Track<T>& scratch,
+                                u32& dropped) {
+    dropped = 0;
+    if constexpr (std::is_same_v<T, u32>) {
+        return track;
+    } else {
+        const std::size_t keys = track.timestamps.size();
+        const auto finite = [&](std::size_t key) {
+            for (u32 v = 0; v < perKey; ++v) {
+                if (!FiniteValue(track.keys_data[key * perKey + v])) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        std::size_t first = 0;
+        while (first < keys && finite(first)) {
+            ++first;
+        }
+        if (first == keys) {
+            return track;
+        }
+        scratch = track;
+        scratch.timestamps.clear();
+        scratch.keys_data.clear();
+        for (std::size_t key = 0; key < keys; ++key) {
+            if (!finite(key)) {
+                ++dropped;
+                continue;
+            }
+            scratch.timestamps.push_back(track.timestamps[key]);
+            scratch.keys_data.insert(
+                scratch.keys_data.end(),
+                track.keys_data.begin() + static_cast<std::ptrdiff_t>(key * perKey),
+                track.keys_data.begin() + static_cast<std::ptrdiff_t>((key + 1) * perKey));
+        }
+        scratch.keyCount = scratch.timestamps.size();
+        return scratch;
+    }
 }
 
 /// MDX counts in milliseconds; WEM counts in seconds.
@@ -195,19 +261,35 @@ private:
 
     /// One track, into every clip that plays part of it.
     template <class T>
-    void addTrack(const mdx::Track<T>& track, const TrackTarget& target) {
-        if (!track.isUsed || track.timestamps.empty()) {
+    void addTrack(const mdx::Track<T>& source, const TrackTarget& target) {
+        if (!source.isUsed || source.timestamps.empty()) {
             return;
         }
         constexpr geom::AttrType kType = ValueTrait<T>::kType;
-        const Interpolation interp = InterpOf(track.interpolationType, kType);
+        const Interpolation interp = InterpOf(source.interpolationType, kType);
         const u32 perKey = ValuesPerKey(interp);
-        if (track.keys_data.size() < track.timestamps.size() * perKey) {
+        if (source.keys_data.size() < source.timestamps.size() * perKey) {
             out_.warn(DiagCode::AnimTrackDropped,
                       std::string("a ") + ToString(interp) + " track holds " +
-                          std::to_string(track.keys_data.size()) + " values for " +
-                          std::to_string(track.timestamps.size()) + " keys",
+                          std::to_string(source.keys_data.size()) + " values for " +
+                          std::to_string(source.timestamps.size()) + " keys",
                       ElementRef(ElementKind::Track, kInvalidIndex));
+            return;
+        }
+        // A key that is not a number is not taken. Kept, it does not stay
+        // where it is: every blend, bake and reduction it enters comes out
+        // not a number too, and a file read with two such tracks was written
+        // with three.
+        mdx::Track<T> scratch;
+        u32 dropped = 0;
+        const mdx::Track<T>& track = FiniteKeys(source, perKey, scratch, dropped);
+        if (dropped != 0) {
+            out_.warn(DiagCode::AnimTrackApproximated,
+                      "a track holds " + std::to_string(dropped) +
+                          " key(s) that are not numbers; they are left out",
+                      ElementRef(ElementKind::Track, kInvalidIndex));
+        }
+        if (track.timestamps.empty()) {
             return;
         }
 
@@ -713,6 +795,11 @@ namespace {
 
 constexpr f32 kMilliseconds = 1000.0f;
 
+/// The order a written track's times are in: signed (`mdx::keyTime`).
+bool EarlierKey(u32 a, u32 b) {
+    return mdx::keyTime(a) < mdx::keyTime(b);
+}
+
 u32 Milliseconds(f32 seconds) {
     const f32 ms = seconds * kMilliseconds;
     return ms <= 0.0f ? 0u : static_cast<u32>(ms + 0.5f);
@@ -742,7 +829,9 @@ struct MergedTrack {
     bool used = false;
     Interpolation interp = Interpolation::Linear;
     u32 globalSequenceId = mdx::Track<f32>::kNoGlobalSequence;
-    std::vector<u32> times;      ///< Absolute milliseconds, ascending, unique.
+    /// Absolute milliseconds, ascending, unique. Signed, as the game reads a
+    /// key's time (`mdx::keyTime`): a key before 0 stays before it.
+    std::vector<i32> times;
     std::vector<const u8*> keys; ///< One pointer per key, into the sub-track's bytes.
     u32 valuesPerKey = 1;
     std::size_t valueSize = 0;
@@ -750,7 +839,7 @@ struct MergedTrack {
     /// Claim @p time for @p key. The FIRST claim wins, which is the whole of the
     /// bracket-key rule: the two clips either side of a boundary both carry the
     /// key that sits on it, and it belongs on the timeline once.
-    void add(u32 time, const u8* key) {
+    void add(i32 time, const u8* key) {
         pending.emplace_back(time, key);
     }
 
@@ -780,7 +869,7 @@ struct MergedTrack {
         return synthesized.back().data();
     }
 
-    std::vector<std::pair<u32, const u8*>> pending;
+    std::vector<std::pair<i32, const u8*>> pending;
     std::deque<std::vector<u8>> synthesized;
 };
 
@@ -883,7 +972,7 @@ void Emit(const MergedTrack& merged, mdx::Track<T>& dst) {
     dst.isUsed = true;
     dst.interpolationType = MdxInterp(merged.interp);
     dst.globalSequenceId = merged.globalSequenceId;
-    dst.timestamps = merged.times;
+    dst.timestamps.assign(merged.times.begin(), merged.times.end()); // the bit pattern
     dst.keyCount = merged.times.size();
     dst.keys_data.clear();
     dst.keys_data.reserve(merged.times.size() * merged.valuesPerKey);
@@ -1030,10 +1119,13 @@ private:
             // The clip's own extent when it has one, and the model's when it
             // does not — a clip from another format, or one an editor made.
             // Conservative either way, which is the direction a bound may err.
-            const Extent& extent = HasExtent(clip.bounds) ? clip.bounds : model_.bounds;
-            sequence.extent.minimum = extent.minimum;
-            sequence.extent.maximum = extent.maximum;
-            sequence.extent.boundsRadius = extent.sphereRadius;
+            if (HasExtent(clip.bounds)) {
+                sequence.extent.minimum = clip.bounds.minimum;
+                sequence.extent.maximum = clip.bounds.maximum;
+                sequence.extent.boundsRadius = clip.bounds.sphereRadius;
+            } else {
+                sequence.extent = out_.modelExtent; // the model's, as `toMdx` wrote it
+            }
 
             nextFree = std::max(nextFree, sequence.intervalEnd + 1000u);
             window.start = sequence.intervalStart;
@@ -1136,11 +1228,13 @@ private:
                 // An `.mdx` clip's keys already say what its engine plays,
                 // bracket keys included: a bracket key's time is negative or
                 // past the clip, which is exactly what puts it back where the
-                // neighbouring window's key already is.
+                // neighbouring window's key already is. One before the
+                // timeline's own start goes back before it too: moved up to 0
+                // it would claim the time of the key that is really there.
                 for (std::size_t k = 0; k < track.times.size(); ++k) {
                     const f32 absolute =
                         track.times[k] * kMillisecondsPerSecond + static_cast<f32>(start);
-                    merged.add(absolute <= 0.0f ? 0u : static_cast<u32>(absolute + 0.5f), at(k));
+                    merged.add(static_cast<i32>(std::floor(absolute + 0.5f)), at(k));
                 }
                 continue;
             }
@@ -1184,12 +1278,12 @@ private:
                 const bool flatIn = smooth && !keyedStart && i == 0;
                 const bool flatOut = smooth && !keyedEnd && i + 1 == inside.size();
                 if (!flatIn && !flatOut) {
-                    merged.add(time, at(k));
+                    merged.add(static_cast<i32>(time), at(k));
                     continue;
                 }
-                merged.add(time, merged.own(Flattened(std::vector<u8>(at(k), at(k) + stride),
-                                                      merged.valueSize, derivative, flatIn,
-                                                      flatOut)));
+                merged.add(static_cast<i32>(time),
+                           merged.own(Flattened(std::vector<u8>(at(k), at(k) + stride),
+                                                merged.valueSize, derivative, flatIn, flatOut)));
             }
             const auto edge = [&](f32 t) {
                 std::vector<u8> value = SampleValue(track, channel.valueType, t);
@@ -1198,10 +1292,10 @@ private:
                                          : std::move(value));
             };
             if (!keyedStart) {
-                merged.add(start, edge(0.0f));
+                merged.add(static_cast<i32>(start), edge(0.0f));
             }
             if (!keyedEnd) {
-                merged.add(end, edge(clip.duration));
+                merged.add(static_cast<i32>(end), edge(clip.duration));
             }
         }
         merged.finish();
@@ -1569,10 +1663,14 @@ private:
         }
 
         // A system this profile does not carry went out as its placement, and
-        // `checkNodeKinds` already said so once for all of its properties.
-        if (channel.target.channel == Channel::EmitterProperty && wemNode < model_.nodes.size() &&
-            !CarriesNodeKind(profile_, model_.nodes.nodes[wemNode].kind)) {
-            return;
+        // `checkNodeKinds` already said so once for all of its properties. So
+        // did an emitter that only names a system (`toMdx`).
+        if (channel.target.channel == Channel::EmitterProperty && wemNode < model_.nodes.size()) {
+            const NodeKind kind = model_.nodes.nodes[wemNode].kind;
+            if (!CarriesNodeKind(profile_, kind) || kind == NodeKind::ParticleEmitter ||
+                kind == NodeKind::RibbonEmitter) {
+                return;
+            }
         }
         // A node the profile does not hold went out as a placement or not at
         // all, which is what its mask asked for.
@@ -1913,10 +2011,12 @@ private:
                     continue;
                 }
                 const bool keyed =
-                    std::any_of(merged.times.begin(), merged.times.end(),
-                                [&](u32 t) { return t >= window.start && t <= window.end; });
+                    std::any_of(merged.times.begin(), merged.times.end(), [&](i32 t) {
+                        return t >= static_cast<i32>(window.start) &&
+                               t <= static_cast<i32>(window.end);
+                    });
                 if (!keyed) {
-                    stepped.add(window.start, restBytes);
+                    stepped.add(static_cast<i32>(window.start), restBytes);
                 }
             }
             stepped.finish();
@@ -2021,8 +2121,9 @@ private:
         // The keys of a track inside a window, and one's value: each key's
         // first float, tangents left out.
         const auto span = [](const mdx::Track<f32>& track, u32 start, u32 end) {
-            const auto first = std::lower_bound(track.timestamps.begin(), track.timestamps.end(), start);
-            const auto last = std::upper_bound(first, track.timestamps.end(), end);
+            const auto first = std::lower_bound(track.timestamps.begin(), track.timestamps.end(),
+                                                start, EarlierKey);
+            const auto last = std::upper_bound(first, track.timestamps.end(), end, EarlierKey);
             return std::pair<std::size_t, std::size_t>(first - track.timestamps.begin(),
                                                        last - track.timestamps.begin());
         };
@@ -2268,7 +2369,7 @@ private:
         }
         for (const mdx::Sequence& sequence : out_.sequences) {
             const auto first = std::lower_bound(track.timestamps.begin(), track.timestamps.end(),
-                                                sequence.intervalStart);
+                                                sequence.intervalStart, EarlierKey);
             if (first != track.timestamps.end() && *first <= sequence.intervalEnd) {
                 continue;
             }

@@ -48,6 +48,7 @@ pre { padding: 0.6rem 0.8rem; overflow-x: auto; }
 | 2026-09-13 | 1.1 | Added the Warcraft III 3.0.0 keywords: the light's `ShadowCasting`, `ShadowCastingStart`, `ShadowCastingEnd`, `QuadraticFalloff`, `LinearFalloff` and `Damping`, and the camera's `Visibility` and depth-of-field properties. See the MDX specification, revision 2.2, for the binary layouts and version gates. |
 | 2026-09-13 | 1.2 | Corrected the camera depth-of-field spellings against the World Editor's own keyword table — the scalar forms are `DOFDistance`, `FocalLength` and `FStop` and the keyed forms are `FocusDistanceKeys`, `FocalLengthKeys` and `FStopKeys`; there is no `FocusDistance` keyword. Recorded the client defect that swaps the two scalar forms. Added the `BackFacesForShadows` and `AmbientOcclusion` layer flags, the complete shader-name set, and the fact that 3.0.0 ignores every material flag except `TwoSided`. |
 | 2026-09-13 | 1.3 | Added the `Glider` top-level block — the MDL form of the MDX `DILG` chunk, whose single `GeosetId` property whitelists a geoset for ray picking — and the sequence property `SyncPoint`, which has always been in the binary record but had no documented keyword. Recorded `BlendColors` and `ComponentSkin` as reserved words that the tokenizer knows and no reader accepts. |
+| 2026-10-13 | 1.4 | `CollisionShape` corrected against the 3.0.0 client (`MDL::ReadCollision`, `MDL::WriteCollisions`): a `Plane` is written as `Length` and `Width` with no vertices, and a `Cylinder`'s two vertices are its base and its top, of which the game keeps the base and the difference in Z. |
 
 ## Table of Contents
 
@@ -1071,9 +1072,27 @@ CollisionShape "Collision" {
 }
 ```
 
-The shape type is a bare flag — `Box`, `Plane`, `Sphere`, or `Cylinder`. `Box`
-and `Plane` carry two `Vertices`; `Sphere` carries one; `Cylinder` carries two.
-`BoundsRadius` is present only for `Sphere` and `Cylinder`.
+The shape type is a bare flag — `Box`, `Plane`, `Sphere`, or `Cylinder`.
+
+- `Box` carries two `Vertices`, its corners.
+- `Sphere` carries one, its center, and `BoundsRadius`.
+- `Cylinder` carries two, its base and its top, and `BoundsRadius`. The game
+  keeps the base and the difference of the two Z values as the height, so the
+  top's X and Y are not read: a cylinder stands on Z.
+- `Plane` carries no vertices, only its two spans:
+
+```mdl
+CollisionShape "Floor" {
+	ObjectId 27,
+	Plane,
+	Length 64.0,
+	Width 32.0,
+}
+```
+
+That is the game's own text (`MDL::ReadCollision`, `MDL::WriteCollisions`).
+Other writers give a plane `Vertices 2`, which the game's reader takes no size
+from; this library reads either and writes the game's.
 
 ### 6.22 FaceFX
 

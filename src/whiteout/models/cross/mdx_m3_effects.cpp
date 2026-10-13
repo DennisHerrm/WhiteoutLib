@@ -61,21 +61,23 @@ T SampleTrack(const mdx::Track<T>& track, f32 timeMs, const T& rest) {
         mdx_slice::InterpOf(track.interpolationType, mdx_slice::ValueTrait<T>::kType));
     const auto value = [&](std::size_t k) { return track.keys_data[k * perKey]; };
     const std::vector<u32>& t = track.timestamps;
-    if (timeMs <= static_cast<f32>(t.front())) {
+    // Signed, as the game orders them (`mdx::keyTime`).
+    const auto at = [&t](std::size_t k) { return static_cast<f32>(mdx::keyTime(t[k])); };
+    if (timeMs <= at(0)) {
         return value(0);
     }
-    if (timeMs >= static_cast<f32>(t.back())) {
+    if (timeMs >= at(t.size() - 1)) {
         return value(t.size() - 1);
     }
     std::size_t hi = 1;
-    while (hi < t.size() && static_cast<f32>(t[hi]) < timeMs) {
+    while (hi < t.size() && at(hi) < timeMs) {
         ++hi;
     }
     if (track.interpolationType == mdx::InterpolationType::None || t[hi] == t[hi - 1]) {
-        return static_cast<f32>(t[hi]) <= timeMs ? value(hi) : value(hi - 1);
+        return at(hi) <= timeMs ? value(hi) : value(hi - 1);
     }
-    const f32 a = static_cast<f32>(t[hi - 1]);
-    const f32 f = (timeMs - a) / (static_cast<f32>(t[hi]) - a);
+    const f32 a = at(hi - 1);
+    const f32 f = (timeMs - a) / (at(hi) - a);
     const T lo = value(hi - 1);
     const T up = value(hi);
     return lo + (up - lo) * f;
@@ -330,7 +332,8 @@ private:
         if (times.empty()) {
             return;
         }
-        std::sort(times.begin(), times.end());
+        std::sort(times.begin(), times.end(),
+                  [](u32 a, u32 b) { return mdx::keyTime(a) < mdx::keyTime(b); });
         times.erase(std::unique(times.begin(), times.end()), times.end());
         const auto stepped = [](bool used, const auto& track) {
             return !used || track.interpolationType == mdx::InterpolationType::None;
@@ -346,7 +349,7 @@ private:
                                     : mdx::InterpolationType::Linear;
         const Vector3f still{0, 0, 0};
         for (const u32 time : times) {
-            const f32 at = static_cast<f32>(time);
+            const f32 at = static_cast<f32>(mdx::keyTime(time));
             // KCTR and KTTR move each end off its rest; KCRL is the roll itself.
             const Vector3f moved = usePosition ? SampleTrack(camera.positionTracks, at, still) : still;
             const Vector3f aimed =

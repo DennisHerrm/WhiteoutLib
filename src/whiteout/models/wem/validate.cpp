@@ -861,10 +861,20 @@ void checkGeometryLimits(const Document& document, Diagnostics& out) {
                 const ProfileDesc& desc = Profile(profile);
 
                 if (desc.indexWidth == IndexWidth::U16 && mesh.vertexCount() > 0xFFFFu) {
-                    out.error(DiagCode::IndexWidthExceeded,
-                              number(mesh.vertexCount()) + " vertices exceeds " +
-                                  ToString(profile) + "'s 16-bit indices",
-                              where, profile);
+                    // An `.mdx` holds such a section as several geosets
+                    // (`toMdx`), so there it is a fact about the file.
+                    if (GameOf(profile) == Game::Warcraft) {
+                        out.info(DiagCode::IndexWidthExceeded,
+                                 number(mesh.vertexCount()) + " vertices is more than one of " +
+                                     ToString(profile) +
+                                     "'s geosets holds; a section past 65535 is written as several",
+                                 where, profile);
+                    } else {
+                        out.error(DiagCode::IndexWidthExceeded,
+                                  number(mesh.vertexCount()) + " vertices exceeds " +
+                                      ToString(profile) + "'s 16-bit indices",
+                                  where, profile);
+                    }
                 }
                 // No n-gon row: every exporter cuts faces through the render
                 // view, so no file sees one (EDIT_MODE_MODELLING_DESIGN.md §2.6).

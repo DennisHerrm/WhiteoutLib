@@ -12,6 +12,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <streambuf>
+#include <type_traits>
 
 namespace whiteout {
 namespace mdx {
@@ -124,6 +125,16 @@ Track<T> Parser::Impl::readTrackChunk(BinaryReader& reader, u32 trackCount, u32 
     track.interpolationType = static_cast<InterpolationType>(interpolationType);
     track.globalSequenceId = globalSequenceId;
     track.keyCount = trackCount;
+    // The game reads an integer track as a time and a value a key whatever its
+    // header says (`ReadBinUintKeyFrames`), so one that claims tangents holds
+    // none, and is stepped.
+    if constexpr (std::is_same_v<T, u32>) {
+        if (isSmoothInterpolation(track.interpolationType)) {
+            issues.push_back("An integer track claims tangents, which the file does not hold for "
+                             "one; read as stepped");
+            track.interpolationType = InterpolationType::None;
+        }
+    }
 
     size_t stride = sizeof(u32) + sizeof(T);
     size_t keyStride = sizeof(T);
@@ -1486,21 +1497,40 @@ void Parser::Impl::parseCLID(BinaryReader& reader, u32 size, Model& mdx) {
 CollisionShape Parser::Impl::parseCollisionShape(BinaryReader& reader) {
     CollisionShape shape;
     shape.node = parseNode(reader);
-    u32 const type_index = reader.read<u32>();
-    shape.type = static_cast<CollisionShape::ShapeType>(type_index);
-
-    constexpr std::array<size_t, 4> shapeVertexCounts = {2, 2, 1, 2};
-
-    u32 const vertexCount = static_cast<u32>(shapeVertexCounts[type_index]);
-
-    shape.vertices.resize(vertexCount);
-    for (u32 i = 0; i < vertexCount; i++) {
-        shape.vertices[i] = reader.read<Vector3f>();
+    u32 const fileType = reader.read<u32>();
+    if (!collisionShapeTypeOfFile(fileType, shape.type)) {
+        // The game reads nothing for a type it does not know, and what is left
+        // of the record is a box of no size.
+        issues.push_back("Unknown collision shape type: " + std::to_string(fileType));
+        shape.vertices.resize(2);
+        return shape;
     }
 
-    if (shape.type == CollisionShape::ShapeType::Sphere ||
-        shape.type == CollisionShape::ShapeType::Cylinder) {
+    // The game's layouts (structures.h), not the two-vertices-and-a-radius the
+    // community tools write for a plane and a cylinder.
+    switch (shape.type) {
+    case CollisionShape::ShapeType::Cylinder: {
+        Vector3f const base = reader.read<Vector3f>();
+        f32 const height = reader.read<f32>();
+        shape.vertices = {base, Vector3f(base.x, base.y, base.z + height)};
         shape.radius = reader.read<f32>();
+        break;
+    }
+    case CollisionShape::ShapeType::Sphere:
+        shape.vertices = {reader.read<Vector3f>()};
+        shape.radius = reader.read<f32>();
+        break;
+    case CollisionShape::ShapeType::Plane: {
+        f32 const length = reader.read<f32>();
+        f32 const width = reader.read<f32>();
+        shape.vertices = {Vector3f(0.0f, 0.0f, 0.0f), Vector3f(length, width, 0.0f)};
+        break;
+    }
+    case CollisionShape::ShapeType::Box: {
+        Vector3f const minimum = reader.read<Vector3f>();
+        shape.vertices = {minimum, reader.read<Vector3f>()};
+        break;
+    }
     }
 
     return shape;

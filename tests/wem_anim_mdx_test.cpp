@@ -197,6 +197,58 @@ TEST_CASE("wem mdx a slice keeps the keys that bracket its window", "[wem][anim]
     CHECK(walkTrack->times[0] == -0.5f);
 }
 
+TEST_CASE("wem mdx a key before time 0 is before every window", "[wem][anim][mdx]") {
+    // Warcraft III reads a key's time signed (`SetSequenceIndices` compares
+    // with `jg`/`jge`), and Blizzard's `UndeadCampaign3D` keys its camera from
+    // -33. Read unsigned, that key is four billion: past every window, so each
+    // one kept its two bracket keys and nothing it plays.
+    mdx::Model model = makeModel();
+    model.sequences[0].intervalStart = 33; // "Stand" [33, 1000]
+    const u32 before = static_cast<u32>(-33);
+    model.bones[0].node.translationTracks =
+        makeTrack<Vector3f>(mdx::InterpolationType::Linear, {before, 0, 33, 67, 2500},
+                            {Vector3f{0, 0, -1}, Vector3f{0, 0, 0}, Vector3f{0, 0, 1},
+                             Vector3f{0, 0, 2}, Vector3f{0, 0, 3}});
+
+    const Document document = convert(model);
+    const Clip* stand = clipNamed(document, "Stand");
+    REQUIRE(stand != nullptr);
+    const SubTrack* track = trackFor(document, *stand, Channel::Translation);
+    REQUIRE(track != nullptr);
+    // The key at 0 as its bracket, the two it plays, and the one after.
+    REQUIRE(track->times.size() == 4u);
+    CHECK(track->times[0] == Catch::Approx(-0.033f));
+    CHECK(track->times[1] == 0.0f);
+    CHECK(track->times[2] == Catch::Approx(0.034f));
+    CHECK(track->times[3] == Catch::Approx(2.467f));
+
+    // Written back, every key is at its own time: the one before 0 stays
+    // before it, and does not take the place of the key that is at 0.
+    MdxConverter converter;
+    const Result<mdx::Model> exported = converter.toMdx(document, ProfileId::Wc3Classic, 800);
+    REQUIRE(exported.ok());
+    const mdx::Track<Vector3f>& written = exported->bones[0].node.translationTracks;
+    CHECK(written.timestamps == std::vector<u32>{0, 33, 67, 2500});
+    REQUIRE(written.keys_data.size() == 4u);
+    CHECK(written.keys_data[0] == Vector3f{0, 0, 0});
+
+    // With a window that starts at 0, the key before it is that window's
+    // bracket, and goes back where it was.
+    model.sequences[0].intervalStart = 0;
+    const Document early = convert(model);
+    const SubTrack* first = trackFor(early, *clipNamed(early, "Stand"), Channel::Translation);
+    REQUIRE(first != nullptr);
+    REQUIRE(first->times.size() == 5u);
+    CHECK(first->times[0] == Catch::Approx(-0.033f));
+    const Result<mdx::Model> again = converter.toMdx(early, ProfileId::Wc3Classic, 800);
+    REQUIRE(again.ok());
+    const mdx::Track<Vector3f>& kept = again->bones[0].node.translationTracks;
+    CHECK(kept.timestamps == std::vector<u32>{before, 0, 33, 67, 2500});
+    REQUIRE(kept.keys_data.size() == 5u);
+    CHECK(kept.keys_data[0] == Vector3f{0, 0, -1});
+    CHECK(kept.keys_data[1] == Vector3f{0, 0, 0});
+}
+
 TEST_CASE("wem mdx hermite keys keep their tangents", "[wem][anim][mdx]") {
     mdx::Model model = makeModel();
     // One key, three values: value, inTangent, outTangent — MDX's own layout.
@@ -1883,6 +1935,7 @@ TEST_CASE("wem mdx bone gates and geoset flags survive the corpus round trip",
         u32 dropShadowKept = 0;
         u32 unnamedBits = 0; ///< Records whose word carries bits beyond 0x3.
         u32 unnamedKept = 0;
+        u32 bareWords = 0; ///< Of those, the ones that state nothing else: not written.
     };
     Counts atDefault;
     Counts atOther;
@@ -1958,6 +2011,12 @@ TEST_CASE("wem mdx bone gates and geoset flags survive the corpus round trip",
                                                               : std::to_string(after)));
                 }
             }
+            std::vector<u8> gated(source.geosets.size(), 0);
+            for (const mdx::Bone& bone : source.bones) {
+                if (gateOf(source, bone) < gated.size()) {
+                    gated[gateOf(source, bone)] = 1;
+                }
+            }
             for (u32 g = 0; g < source.geosets.size(); ++g) {
                 const mdx::GeosetAnimation* was = firstRecord(source, g);
                 if (was == nullptr || keptAs[g] == kInvalidIndex) {
@@ -1971,6 +2030,16 @@ TEST_CASE("wem mdx bone gates and geoset flags survive the corpus round trip",
                     counts.dropShadowKept += (wrote & 0x1u) != 0 ? 1u : 0u;
                 }
                 if ((word & ~0x3u) != 0) {
+                    // A record that states nothing but its word is not written:
+                    // the game reads none of those bits. One that is there for
+                    // another reason keeps them.
+                    const bool states = was->alpha != 1.0f || was->color != Vector3f(1.0f, 1.0f, 1.0f) ||
+                                        was->alphaTracks.isUsed || was->colorTracks.isUsed ||
+                                        (word & 0x1u) != 0 || gated[g] != 0;
+                    if (!states) {
+                        ++counts.bareWords;
+                        continue;
+                    }
                     ++counts.unnamedBits;
                     counts.unnamedKept += now != nullptr && wrote == word ? 1u : 0u;
                 }
@@ -1982,7 +2051,8 @@ TEST_CASE("wem mdx bone gates and geoset flags survive the corpus round trip",
                   << " gated bones, " << c.same << " unchanged, " << c.moved << " moved, "
                   << c.lost << " unresolvable; DropShadow " << c.dropShadowKept << " of "
                   << c.dropShadow << " kept; unnamed flag words " << c.unnamedKept << " of "
-                  << c.unnamedBits << " kept" << std::endl;
+                  << c.unnamedBits << " kept, " << c.bareWords << " on a record that states nothing"
+                  << std::endl;
     };
     report("at the default profile", atDefault);
     report("at the other profile", atOther);

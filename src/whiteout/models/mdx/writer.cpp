@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Fernando Sahmkow
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <whiteout/models/mdx/track_walk.h>
 #include <whiteout/models/mdx/writer.h>
 #include "../../common/binary_writer.h"
 #include "../../common/streams.h"
@@ -54,12 +56,6 @@ static void writeTrackChunk(BinaryWriter& writer, u32 tag, const Track<T>& track
     if (!track.isUsed)
         return; // Skip unused tracks
 
-    // Write track header
-    writer.write(tag);
-    writer.write(static_cast<u32>(track.keyCount));
-    writer.write(static_cast<u32>(track.interpolationType));
-    writer.write(track.globalSequenceId);
-
     // The in-memory layout splits timestamps from key-value data, but the on-disk
     // layout interleaves them per keyframe -- mirror Parser::Impl::readTrackChunk:
     //   non-smooth: { u32 timestamp, T value }                * keyCount
@@ -67,9 +63,19 @@ static void writeTrackChunk(BinaryWriter& writer, u32 tag, const Track<T>& track
     const size_t keyComponents = isSmoothInterpolation(track.interpolationType) ? 3 : 1;
     const size_t valueStride = keyComponents * sizeof(T);
     const size_t stride = sizeof(u32) + valueStride;
+    // The keys the arrays hold, whatever `keyCount` claims: it is the count
+    // written, and the reader takes exactly that many.
+    const size_t keyCount =
+        std::min({track.keyCount, track.timestamps.size(), track.keys_data.size() / keyComponents});
 
-    std::vector<u8> buffer(track.keyCount * stride);
-    for (size_t i = 0; i < track.keyCount; ++i) {
+    // Write track header
+    writer.write(tag);
+    writer.write(static_cast<u32>(keyCount));
+    writer.write(static_cast<u32>(track.interpolationType));
+    writer.write(track.globalSequenceId);
+
+    std::vector<u8> buffer(keyCount * stride);
+    for (size_t i = 0; i < keyCount; ++i) {
         std::memcpy(buffer.data() + i * stride, &track.timestamps[i], sizeof(u32));
         std::memcpy(buffer.data() + i * stride + sizeof(u32), &track.keys_data[i * keyComponents],
                     valueStride);
@@ -78,12 +84,27 @@ static void writeTrackChunk(BinaryWriter& writer, u32 tag, const Track<T>& track
                       static_cast<u32>(buffer.size()));
 }
 
+/// A record's own tracks. The list, and its order, is the walk's
+/// (`track_walk.h`), which the loader's guard reads through too.
+template <class Record>
+static void writeOwnTracks(BinaryWriter& writer, const Record& record, u32 version) {
+    forEachOwnTrack(record, version,
+                    [&writer](u32 tag, const auto& track) { writeTrackChunk(writer, tag, track); });
+}
+
 // ============================================================================
 // WriterImpl - Implementation class using PImpl idiom
 // ============================================================================
 
 class Writer::Impl {
 public:
+    bool repairs = true;
+    LoadReport report;
+
+    /// The model `write` writes for @p mdx: itself, or @p scratch holding its
+    /// repaired copy when the loader's rules asked for one (`makeLoadable`).
+    const Model& loadable(const Model& mdx, Model& scratch);
+
     struct ChunkHeader {
         u32 tag;  ///< Chunk identifier
         u32 size; ///< Chunk data size in bytes
@@ -121,8 +142,8 @@ public:
     void writeCORN(BinaryWriter& writer, const Model& mdx);
 
     // Structure writers - write individual structure types
-    void writeMaterial(BinaryWriter& writer, const Material& mat, const Model& mdx);
-    void writeLayer(BinaryWriter& writer, const Layer& layer, const Model& mdx);
+    void writeMaterial(BinaryWriter& writer, const Material& mat, u32 version);
+    void writeLayer(BinaryWriter& writer, const Layer& layer, u32 version);
     void writeTextureAnimation(BinaryWriter& writer, const TextureAnimation& anim);
     void writeGeoset(BinaryWriter& writer, const Geoset& geoset, const Model& mdx);
     void writeGeosetAnimation(BinaryWriter& writer, const GeosetAnimation& anim);
@@ -225,7 +246,37 @@ Writer::Writer() : pImpl(std::make_unique<Impl>()) {}
 
 Writer::~Writer() = default;
 
-void Writer::write(const std::string& filePath, const Model& mdx, MdlFormat mdlFormat) {
+void Writer::setRepairs(bool repairs) {
+    pImpl->repairs = repairs;
+}
+
+const LoadReport& Writer::lastReport() const {
+    return pImpl->report;
+}
+
+const Model& Writer::Impl::loadable(const Model& mdx, Model& scratch) {
+    report = {};
+    if (!repairs) {
+        return mdx;
+    }
+    scratch = mdx;
+    report = makeLoadable(scratch);
+    return report.repaired() ? scratch : mdx;
+}
+
+std::vector<u8> Writer::materialRecord(const Material& material, u32 version) {
+    std::vector<u8> buffer;
+    common::vector_streambuf streambuf(buffer);
+    std::ostream out(&streambuf);
+    BinaryWriter writer(out);
+    Impl().writeMaterial(writer, material, version);
+    return buffer;
+}
+
+void Writer::write(const std::string& filePath, const Model& given, MdlFormat mdlFormat) {
+    Model scratch;
+    const Model& mdx = pImpl->loadable(given, scratch);
+
     // Detect MDL text format from extension
     bool isMdl = false;
     if (filePath.size() >= 4) {
@@ -252,7 +303,9 @@ void Writer::write(const std::string& filePath, const Model& mdx, MdlFormat mdlF
     pImpl->write(writer, mdx);
 }
 
-std::vector<u8> Writer::write(const Model& mdx, MDLXFormat format, MdlFormat mdlFormat) {
+std::vector<u8> Writer::write(const Model& given, MDLXFormat format, MdlFormat mdlFormat) {
+    Model scratch;
+    const Model& mdx = pImpl->loadable(given, scratch);
     if (format == MDLXFormat::MDL) {
         std::string text = writeModelToMdl(mdx, mdlFormat);
         return std::vector<u8>(text.begin(), text.end());
@@ -345,24 +398,24 @@ void Writer::Impl::writeSoundEmitter(BinaryWriter& writer, const SoundEmitter& s
 
     writeNode(writer, snem.node);
 
-    writeTrackChunk(writer, KSEK_TAG, snem.soundTrack);
+    writeOwnTracks(writer, snem, 0);
 }
 
 void Writer::Impl::writeMTLS(BinaryWriter& writer, const Model& mdx) {
     SizeEnclosure const sizeEnclosure(writer, MTLS_TAG);
 
     for (const auto& mat : mdx.materials) {
-        writeMaterial(writer, mat, mdx);
+        writeMaterial(writer, mat, mdx.version);
     }
 }
 
-void Writer::Impl::writeMaterial(BinaryWriter& writer, const Material& mat, const Model& mdx) {
+void Writer::Impl::writeMaterial(BinaryWriter& writer, const Material& mat, u32 version) {
     SizeEnclosure const sizeEnclosure(writer);
 
     writer.write(mat.priorityPlane);
     writer.write(mat.flags);
 
-    if (mdx.version > 800 && mdx.version < 1100) {
+    if (version > 800 && version < 1100) {
         writer.writeString(mat.shader, 80);
     }
 
@@ -371,11 +424,11 @@ void Writer::Impl::writeMaterial(BinaryWriter& writer, const Material& mat, cons
     writer.write(static_cast<u32>(mat.layers.size()));
 
     for (const auto& layer : mat.layers) {
-        writeLayer(writer, layer, mdx);
+        writeLayer(writer, layer, version);
     }
 }
 
-void Writer::Impl::writeLayer(BinaryWriter& writer, const Layer& layer, const Model& mdx) {
+void Writer::Impl::writeLayer(BinaryWriter& writer, const Layer& layer, u32 version) {
     SizeEnclosure const sizeEnclosure(writer);
 
     writer.write(static_cast<u32>(layer.filterMode));
@@ -387,16 +440,16 @@ void Writer::Impl::writeLayer(BinaryWriter& writer, const Layer& layer, const Mo
 
     // emissiveGain exists from v900, the fresnel fields only from v1000 —
     // must match parseLayer's gating (and the KFC3/KFCA/KFTC track gate below).
-    if (mdx.version > 800) {
+    if (version > 800) {
         writer.write(layer.emissiveGain);
     }
-    if (mdx.version > 900) {
+    if (version > 900) {
         writer.write(layer.fresnelColor);
         writer.write(layer.fresnelOpacity);
         writer.write(layer.fresnelTeamColor);
     }
 
-    if (mdx.version >= 1100) {
+    if (version >= 1100) {
         writer.write(layer.shader);
         writer.write(static_cast<u32>(layer.subTextures.size()));
 
@@ -407,19 +460,8 @@ void Writer::Impl::writeLayer(BinaryWriter& writer, const Layer& layer, const Mo
         }
     }
 
-    // Write animation tracks
-    if (mdx.version < 1100) {
-        writeTrackChunk(writer, KMTF_TAG, layer.textureIdTracks);
-    }
-    writeTrackChunk(writer, KMTA_TAG, layer.alphaTracks);
-    if (mdx.version > 800) {
-        writeTrackChunk(writer, KMTE_TAG, layer.emissiveGainTracks);
-    }
-    if (mdx.version > 900) {
-        writeTrackChunk(writer, KFC3_TAG, layer.fresnelColorTracks);
-        writeTrackChunk(writer, KFCA_TAG, layer.fresnelAlphaTracks);
-        writeTrackChunk(writer, KFTC_TAG, layer.fresnelTeamColorTracks);
-    }
+    // The layer's own tracks; a sub-texture's flipbook went out with it above.
+    writeOwnTracks(writer, layer, version);
 }
 
 void Writer::Impl::writeTXAN(BinaryWriter& writer, const Model& mdx) {
@@ -433,9 +475,7 @@ void Writer::Impl::writeTXAN(BinaryWriter& writer, const Model& mdx) {
 void Writer::Impl::writeTextureAnimation(BinaryWriter& writer, const TextureAnimation& anim) {
     SizeEnclosure const sizeEnclosure(writer);
 
-    writeTrackChunk(writer, KTAT_TAG, anim.translationTracks);
-    writeTrackChunk(writer, KTAR_TAG, anim.rotationTracks);
-    writeTrackChunk(writer, KTAS_TAG, anim.scalingTracks);
+    writeOwnTracks(writer, anim, 0);
 }
 
 void Writer::Impl::writeGEOS(BinaryWriter& writer, const Model& mdx) {
@@ -548,8 +588,7 @@ void Writer::Impl::writeGeosetAnimation(BinaryWriter& writer, const GeosetAnimat
     writer.write(anim.color);
     writer.write(anim.geosetId);
 
-    writeTrackChunk(writer, KGAO_TAG, anim.alphaTracks);
-    writeTrackChunk(writer, KGAC_TAG, anim.colorTracks);
+    writeOwnTracks(writer, anim, 0);
 }
 
 void Writer::Impl::writeBONE(BinaryWriter& writer, const Model& mdx) {
@@ -578,9 +617,8 @@ void Writer::Impl::writeNode(BinaryWriter& writer, const Node& node) {
 }
 
 void Writer::Impl::writeNodeTracks(BinaryWriter& writer, const Node& node) {
-    writeTrackChunk(writer, KGTR_TAG, node.translationTracks);
-    writeTrackChunk(writer, KGRT_TAG, node.rotationTracks);
-    writeTrackChunk(writer, KGSC_TAG, node.scalingTracks);
+    forEachNodeTrack(
+        node, [&writer](u32 tag, const auto& track) { writeTrackChunk(writer, tag, track); });
 }
 
 void Writer::Impl::writeLITE(BinaryWriter& writer, const Model& mdx) {
@@ -617,22 +655,7 @@ void Writer::Impl::writeLight(BinaryWriter& writer, const Light& light, const Mo
         writer.write(light.damping);
     }
 
-    writeTrackChunk(writer, KLAS_TAG, light.attenuationStartTracks);
-    writeTrackChunk(writer, KLAE_TAG, light.attenuationEndTracks);
-    writeTrackChunk(writer, KLAC_TAG, light.colorTracks);
-    writeTrackChunk(writer, KLAI_TAG, light.intensityTracks);
-    writeTrackChunk(writer, KLBI_TAG, light.ambientIntensityTracks);
-    writeTrackChunk(writer, KLBC_TAG, light.ambientColorTracks);
-    writeTrackChunk(writer, KLAV_TAG, light.visibilityTracks);
-    if (mdx.version >= 1300) {
-        writeTrackChunk(writer, KLSS_TAG, light.shadowCastingStartTracks);
-        writeTrackChunk(writer, KLSE_TAG, light.shadowCastingEndTracks);
-    }
-    if (mdx.version >= 1600) {
-        writeTrackChunk(writer, KLQF_TAG, light.quadraticFalloffTracks);
-        writeTrackChunk(writer, KLLF_TAG, light.linearFalloffTracks);
-        writeTrackChunk(writer, KLDA_TAG, light.dampingTracks);
-    }
+    writeOwnTracks(writer, light, mdx.version);
 }
 
 void Writer::Impl::writeHELP(BinaryWriter& writer, const Model& mdx) {
@@ -662,7 +685,7 @@ void Writer::Impl::writeAttachment(BinaryWriter& writer, const Attachment& att) 
     writer.writeString(att.path, 260);
     writer.write(att.attachmentId);
 
-    writeTrackChunk(writer, KATV_TAG, att.visibilityTracks);
+    writeOwnTracks(writer, att, 0);
 }
 
 void Writer::Impl::writePIVT(BinaryWriter& writer, const Model& mdx) {
@@ -691,13 +714,7 @@ void Writer::Impl::writeParticleEmitter(BinaryWriter& writer, const ParticleEmit
     writer.write(pem.lifespan);
     writer.write(pem.initialVelocity);
 
-    writeTrackChunk(writer, KPEE_TAG, pem.emissionRateTracks);
-    writeTrackChunk(writer, KPEG_TAG, pem.gravityTracks);
-    writeTrackChunk(writer, KPLN_TAG, pem.longitudeTracks);
-    writeTrackChunk(writer, KPLT_TAG, pem.latitudeTracks);
-    writeTrackChunk(writer, KPEL_TAG, pem.lifespanTracks);
-    writeTrackChunk(writer, KPES_TAG, pem.speedTracks);
-    writeTrackChunk(writer, KPEV_TAG, pem.visibilityTracks);
+    writeOwnTracks(writer, pem, 0);
 }
 
 void Writer::Impl::writePRE2(BinaryWriter& writer, const Model& mdx) {
@@ -757,14 +774,7 @@ void Writer::Impl::writeParticleEmitter2(BinaryWriter& writer, const ParticleEmi
     writer.write(pem2.priorityPlane);
     writer.write(pem2.replaceableId);
 
-    writeTrackChunk(writer, KP2S_TAG, pem2.speedTracks);
-    writeTrackChunk(writer, KP2R_TAG, pem2.variationTracks);
-    writeTrackChunk(writer, KP2L_TAG, pem2.latitudeTracks);
-    writeTrackChunk(writer, KP2G_TAG, pem2.gravityTracks);
-    writeTrackChunk(writer, KP2E_TAG, pem2.emissionRateTracks);
-    writeTrackChunk(writer, KP2N_TAG, pem2.lengthTracks);
-    writeTrackChunk(writer, KP2W_TAG, pem2.widthTracks);
-    writeTrackChunk(writer, KP2V_TAG, pem2.visibilityTracks);
+    writeOwnTracks(writer, pem2, 0);
 }
 
 void Writer::Impl::writeRIBB(BinaryWriter& writer, const Model& mdx) {
@@ -791,12 +801,7 @@ void Writer::Impl::writeRibbonEmitter(BinaryWriter& writer, const RibbonEmitter&
     writer.write(ribb.materialId);
     writer.write(ribb.gravity);
 
-    writeTrackChunk(writer, KRHA_TAG, ribb.heightAboveTracks);
-    writeTrackChunk(writer, KRHB_TAG, ribb.heightBelowTracks);
-    writeTrackChunk(writer, KRAL_TAG, ribb.alphaTracks);
-    writeTrackChunk(writer, KRCO_TAG, ribb.colorTracks);
-    writeTrackChunk(writer, KRTX_TAG, ribb.textureSlotTracks);
-    writeTrackChunk(writer, KRVS_TAG, ribb.visibilityTracks);
+    writeOwnTracks(writer, ribb, 0);
 }
 
 void Writer::Impl::writeEVTS(BinaryWriter& writer, const Model& mdx) {
@@ -836,16 +841,7 @@ void Writer::Impl::writeCamera(BinaryWriter& writer, const Camera& cam, const Mo
     writer.write(cam.nearClippingPlane);
     writer.write(cam.targetPosition);
 
-    writeTrackChunk(writer, KCTR_TAG, cam.positionTracks);
-    writeTrackChunk(writer, KCRL_TAG, cam.targetRotationTracks);
-    writeTrackChunk(writer, KTTR_TAG, cam.targetPositionTracks);
-    // The 3.0 client reads these at any version; Classic knows none of them.
-    if (mdx.version > 800) {
-        writeTrackChunk(writer, KCVS_TAG, cam.visibilityTracks);
-        writeTrackChunk(writer, IDUF_TAG, cam.focusDistanceTracks);
-        writeTrackChunk(writer, ELAF_TAG, cam.focalLengthTracks);
-        writeTrackChunk(writer, PTSF_TAG, cam.fStopTracks);
-    }
+    writeOwnTracks(writer, cam, mdx.version);
 }
 
 void Writer::Impl::writeCLID(BinaryWriter& writer, const Model& mdx) {
@@ -858,13 +854,33 @@ void Writer::Impl::writeCLID(BinaryWriter& writer, const Model& mdx) {
 
 void Writer::Impl::writeCollisionShape(BinaryWriter& writer, const CollisionShape& shape) {
     writeNode(writer, shape.node);
-    writer.write(static_cast<u32>(shape.type));
+    writer.write(collisionShapeFileType(shape.type));
 
-    writer.write(shape.vertices);
-
-    if (shape.type == CollisionShape::ShapeType::Sphere ||
-        shape.type == CollisionShape::ShapeType::Cylinder) {
+    // Each type's exact bytes, whatever the vector holds: the chunk has no
+    // sizes, so one float too many puts the reader in the middle of the next
+    // shape (structures.h has the layouts).
+    const auto vertex = [&shape](std::size_t i) {
+        return i < shape.vertices.size() ? shape.vertices[i] : Vector3f{};
+    };
+    switch (shape.type) {
+    case CollisionShape::ShapeType::Cylinder:
+        writer.write(vertex(0));
+        writer.write(shape.vertices.size() > 1 ? vertex(1).z - vertex(0).z : 0.0f);
         writer.write(shape.radius);
+        break;
+    case CollisionShape::ShapeType::Sphere:
+        writer.write(vertex(0));
+        writer.write(shape.radius);
+        break;
+    case CollisionShape::ShapeType::Plane:
+        writer.write(vertex(1).x - vertex(0).x);
+        writer.write(vertex(1).y - vertex(0).y);
+        break;
+    case CollisionShape::ShapeType::Box:
+    default:
+        writer.write(vertex(0));
+        writer.write(vertex(1));
+        break;
     }
 }
 
@@ -913,12 +929,7 @@ void Writer::Impl::writeCornEmitter(BinaryWriter& writer, const CornEmitter& cor
     writer.writeString(corn.path, 260);
     writer.writeString(corn.animVisibilityGuide, 260);
 
-    writeTrackChunk(writer, KPPL_TAG, corn.lifeSpanTracks);
-    writeTrackChunk(writer, KPPE_TAG, corn.emissionRateTracks);
-    writeTrackChunk(writer, KPPS_TAG, corn.speedTracks);
-    writeTrackChunk(writer, KPPC_TAG, corn.colorTracks);
-    writeTrackChunk(writer, KPPA_TAG, corn.alphaTracks);
-    writeTrackChunk(writer, KPPV_TAG, corn.visibilityTracks);
+    writeOwnTracks(writer, corn, 0);
 }
 
 } // namespace mdx

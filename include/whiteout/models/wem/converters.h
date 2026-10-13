@@ -110,6 +110,11 @@ struct MdxExportMap {
     /// Per mesh: the geosets `toMdx` writes for it, in order. One per section
     /// the profile draws; a mesh with no sections still writes one
     /// (EDIT_MODE_MESH_DESIGN.md §4.4).
+    ///
+    /// A section that holds more vertices than a geoset can (65,535) is cut
+    /// into several. Its first piece is the entry above; the others follow at
+    /// the END of the mesh's list, and are numbered after every other geoset
+    /// of the file, so no number here depends on whether a section was cut.
     std::vector<std::vector<u32>> geosetsOfMesh;
     /// Parallel to @ref geosetsOfMesh: the section each of those geosets is.
     /// A section the profile does not draw has no entry in either.
@@ -118,7 +123,21 @@ struct MdxExportMap {
 
 /// @ref MdxExportMap for `document.models[model]` written as @p profile,
 /// computed without exporting. Empty when the document has no such model.
-MdxExportMap MdxExportMapOf(const Document& document, u32 model, ProfileId profile);
+/// @p secondUvSet is `toMdx`'s `drawnSecondUvSet`: a set that splits vertices
+/// decides where a section past the geoset limit is cut.
+MdxExportMap MdxExportMapOf(const Document& document, u32 model, ProfileId profile,
+                            std::optional<u32> secondUvSet = std::nullopt);
+
+/// What an `.mdx` EXPORT does to the model `toMdx` wrote before it is a file,
+/// each change said in @p out: the records that do nothing in the game go
+/// (`mdx::pruneModel`), and what the game's loader refuses is repaired
+/// (`mdx::makeLoadable`).
+///
+/// Apart from `toMdx` because `toMdx` is also what a host draws a document
+/// through, and its geoset and node numbers are `MdxExportMap`'s: removing a
+/// geoset there would move every number a host holds. `exportToBytes` runs
+/// this, and so does a host that converts by its own route.
+void FinishMdxExport(mdx::Model& model, Diagnostics& out);
 
 /// Where `toMdx` puts a material's ordinals, for a caller that has to find a
 /// layer of the `.mdx` it built from what the document names: a `UvAnimation`
@@ -362,8 +381,8 @@ public:
                                             u32 sourceVersion) const;
 
     /// The document texture holding Warcraft III's stock neutral for @p slot,
-    /// appended when no entry has the same path (compared case- and
-    /// slash-insensitively) and replaceable id. `kInvalidIndex` for a slot the
+    /// appended when no entry has the same path (compared case-, slash- and
+    /// extension-insensitively) and replaceable id. `kInvalidIndex` for a slot the
     /// game has no neutral for. @p appended, when given, says whether it was.
     u32 internStockTexture(Document& document, mdx::Layer::SlotType slot,
                            bool* appended = nullptr) const;
@@ -400,10 +419,10 @@ public:
      * The same code path the export runs per geoset (the render view, the
      * vertex slice, the skin encoding), on a mesh that need not be in the
      * document yet: a merge asks it of a trial merge (EDIT_MODE_MESH_DESIGN.md
-     * §7.2). The limits that matter come back by code, as warnings, because the
-     * export itself writes on past them: `IndexWidthExceeded` (more than 65,536
-     * vertices in one geoset, whose indices are then truncated) and
-     * `BonePaletteLimit`: at v800, where the groups are the skin, a warning
+     * §7.2). The limits that matter come back by code, and not as errors,
+     * because the export itself writes on past them: `IndexWidthExceeded`
+     * (a section of more than 65,535 vertices, which is written as several
+     * geosets) and `BonePaletteLimit`: at v800, where the groups are the skin, a warning
      * that the Skin Quantizer merged groups past 256; above it, an error for a
      * palette of more than 256 bones below v1400, which the export refuses.
      * @p writtenVertices, when given, receives the vertices the geosets hold

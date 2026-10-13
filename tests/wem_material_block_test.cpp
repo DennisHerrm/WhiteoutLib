@@ -495,7 +495,7 @@ TEST_CASE("wem material block: the default blocks", "[wem][materials][edit]") {
         const TextureRef& team = document.textures[layer.subTextures[4].textureId];
         CHECK(team.replaceableId == 1u);
         CHECK(team.path.empty());
-        CHECK(document.textures[layer.subTextures[1].textureId].path == "Textures/normal.blp");
+        CHECK(document.textures[layer.subTextures[1].textureId].path == "Textures/normal.dds");
         CHECK(document.textures[layer.subTextures[1].textureId].flags == 3u);
 
         const MaterialBlockDraft second =

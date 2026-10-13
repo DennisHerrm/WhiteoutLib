@@ -301,6 +301,10 @@ target_include_directories(mdl_writer_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 whiteout_add_test(mdx_mdl_roundtrip_test mdx_mdl_roundtrip_test.cpp)
 target_include_directories(mdx_mdl_roundtrip_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
+# What Warcraft III's loader requires of an .mdx, asserted on the bytes.
+whiteout_add_test(mdx_loadable_test mdx_loadable_test.cpp)
+target_include_directories(mdx_loadable_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
 # =============================================================================
 # CASC Tests
 # =============================================================================

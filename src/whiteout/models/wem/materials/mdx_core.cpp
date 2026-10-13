@@ -6,6 +6,7 @@
 #include "../native/mdx_copy.h"
 
 #include <algorithm>
+#include <cctype>
 #include <optional>
 #include <string>
 
@@ -493,23 +494,50 @@ u32 Context::stockTexture(const std::string& path, u32 replaceableId) const {
 StockSlotTexture StockTextureFor(Layer::SlotType slot) {
     switch (slot) {
     case Layer::SlotType::DiffuseMap:
-        return {"Textures/white.blp", 0};
+        return {"Textures/white.dds", 0};
     case Layer::SlotType::NormalMap:
-        return {"Textures/normal.blp", 0};
+        return {"Textures/normal.dds", 0};
     case Layer::SlotType::ORMMap:
-        return {"Textures/ORM.blp", 0};
+        return {"Textures/ORM.dds", 0};
     case Layer::SlotType::EmissiveMap:
-        return {"Textures/Black32.blp", 0};
+        return {"Textures/Black32.dds", 0};
     case Layer::SlotType::TeamColor:
         // No file backs it: the engine substitutes the owning player's swatch,
         // and the ORM's alpha decides where it lands.
         return {"", 1};
     case Layer::SlotType::EnvironmentMap:
-        return {"ReplaceableTextures/EnvironmentMap.blp", 0};
+        return {"ReplaceableTextures/EnvironmentMap.dds", 0};
     default:
         break;
     }
     return {};
+}
+
+std::string StockSpelling(const std::string& path) {
+    // What the game resolves a texture by, short of its container: the path,
+    // whatever its case, its slashes or its extension.
+    const auto key = [](std::string text) {
+        const std::size_t dot = text.rfind('.');
+        if (dot != std::string::npos && text.find_first_of("/\\", dot) == std::string::npos) {
+            text.resize(dot);
+        }
+        for (char& c : text) {
+            c = c == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        return text;
+    };
+    const std::string wanted = key(path);
+    // Not the diffuse slot's: `Textures/white` is a classic layer's texture
+    // far more often than an HD slot's fill, and those keep their name.
+    for (const Layer::SlotType slot : {Layer::SlotType::NormalMap, Layer::SlotType::ORMMap,
+                                       Layer::SlotType::EmissiveMap,
+                                       Layer::SlotType::EnvironmentMap}) {
+        const StockSlotTexture stock = StockTextureFor(slot);
+        if (key(stock.path) == wanted) {
+            return stock.path;
+        }
+    }
+    return path;
 }
 
 // ============================================================================
@@ -1186,11 +1214,11 @@ void exportPbr(const PbrDeferredBody& body, const CommonMaterial& common, const 
     // empty, and `-1` is not a value the engine has a reading for: it is a
     // texture id like any other. A material with no map of its own for a slot
     // names Warcraft III's own neutral there instead (`StockTextureFor`), which
-    // is what shipped content does -- `Textures/normal.blp` on 900 files,
-    // `Textures/Black32.blp` on 3,237.
+    // is what shipped content does -- `Textures/normal` on 900 files,
+    // `Textures/Black32` on 3,237.
     //
     // The environment map is the one slot whose own input is *ignored*: all
-    // 12,893 name `ReplaceableTextures/EnvironmentMap.blp`, because the engine
+    // 12,893 name `ReplaceableTextures/EnvironmentMap`, because the engine
     // substitutes the current map's own reflection there. A source's reflection
     // map has nowhere to go, and binding it would be a cube the map disagrees
     // with.

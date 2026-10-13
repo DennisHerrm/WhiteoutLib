@@ -869,6 +869,11 @@ TEST_CASE("wem mdx writes no negative emission rate or lifespan", "[wem][node][e
     MdxConverter converter;
     Result<mdx::Model> back = converter.toMdx(document, ProfileId::Wc3Classic, 800);
     REQUIRE(back.ok());
+    // The loader's rule, kept with the others: every route to a file runs it
+    // (`mdx::makeLoadable`), and an export says what it did.
+    Diagnostics said;
+    FinishMdxExport(*back, said);
+    CHECK(said.countOf(DiagCode::Unspecified) >= 1u);
     REQUIRE(back->particleEmitters2.size() == 1u);
     REQUIRE(back->particleEmitters.size() == 1u);
     const auto noneBelowZero = [](const mdx::Track<f32>& track, f32 highest) {

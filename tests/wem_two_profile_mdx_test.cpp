@@ -356,9 +356,10 @@ TEST_CASE("wem a Reforged material never leaves a slot empty", "[wem][materials]
     // Measured, not chosen: across the 12,893 six-slot HD layers in
     // `war3.w3mod` not one slot is `-1`. The engine reads that field as a
     // texture id, and a material with no map of its own names Warcraft III's
-    // stock neutral instead — `Textures/normal.blp` on 900 shipped files,
-    // `Textures/Black32.blp` on 3,237, `ReplaceableTextures/EnvironmentMap.blp`
-    // on 3,681, and replaceable 1 in the team slot on all of them.
+    // stock neutral instead — `Textures/normal` on 900 shipped files,
+    // `Textures/Black32` on 3,237, `ReplaceableTextures/EnvironmentMap` on
+    // 3,681, and replaceable 1 in the team slot on all of them. Each is named
+    // `.dds`, the container an HD texture is.
     for (const u32 version : {1000u, 1200u}) {
         StockContext stock(version);
         Diagnostics diagnostics;
@@ -374,10 +375,26 @@ TEST_CASE("wem a Reforged material never leaves a slot empty", "[wem][materials]
         CHECK(stock.nameOf(ids[0]) == "document");
         CHECK(stock.nameOf(ids[1]) == "document");
         CHECK(stock.nameOf(ids[2]) == "document");
-        CHECK(stock.nameOf(ids[3]) == "Textures/Black32.blp");
+        CHECK(stock.nameOf(ids[3]) == "Textures/Black32.dds");
         CHECK(stock.nameOf(ids[4]) == "#1");
-        CHECK(stock.nameOf(ids[5]) == "ReplaceableTextures/EnvironmentMap.blp");
+        CHECK(stock.nameOf(ids[5]) == "ReplaceableTextures/EnvironmentMap.dds");
     }
+}
+
+TEST_CASE("wem a stock neutral is spelled one way in an HD file", "[wem][materials][mdx]") {
+    // A shipped 3.0.0 model names `Textures/Black32.blp`; written from a
+    // document as HD, it is the same `.dds` a material with no map names.
+    CHECK(mdx_core::StockSpelling("Textures\\black32.BLP") == "Textures/Black32.dds");
+    CHECK(mdx_core::StockSpelling("ReplaceableTextures/EnvironmentMap.blp") ==
+          "ReplaceableTextures/EnvironmentMap.dds");
+    CHECK(mdx_core::StockSpelling("Textures/normal.tif") == "Textures/normal.dds");
+    // The neutrals alone: a model's own map keeps the name it was given.
+    CHECK(mdx_core::StockSpelling("Units/Human/Footman/Footman.blp") ==
+          "Units/Human/Footman/Footman.blp");
+    CHECK(mdx_core::StockSpelling("Textures/Black32_Glow.blp") == "Textures/Black32_Glow.blp");
+    // Nor the diffuse slot's fill, which a classic layer names as well.
+    CHECK(mdx_core::StockSpelling("Textures\\white.blp") == "Textures\\white.blp");
+    CHECK(mdx_core::StockSpelling("").empty());
 }
 
 TEST_CASE("wem the environment slot is Warcraft III's own, never the source's",
@@ -394,7 +411,7 @@ TEST_CASE("wem the environment slot is Warcraft III's own, never the source's",
 
     const std::vector<u32> ids = slotTextures(exported);
     REQUIRE(ids.size() == mdx_core::kHdPositionalSlotCount);
-    CHECK(stock.nameOf(ids[5]) == "ReplaceableTextures/EnvironmentMap.blp");
+    CHECK(stock.nameOf(ids[5]) == "ReplaceableTextures/EnvironmentMap.dds");
 }
 
 TEST_CASE("wem a colour-only material goes out as SD on HD", "[wem][materials][mdx]") {

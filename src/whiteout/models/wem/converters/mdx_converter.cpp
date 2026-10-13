@@ -32,7 +32,9 @@
  * parentPivot` instead.
  */
 
+#include "whiteout/models/mdx/loadable.h"
 #include "whiteout/models/mdx/parser.h"
+#include "whiteout/models/mdx/prune.h"
 #include "whiteout/models/mdx/writer.h"
 #include "whiteout/models/wem/converters.h"
 #include "whiteout/models/wem/geometry/builder.h"
@@ -725,7 +727,7 @@ NodeImport ImportNodes(const mdx::Model& source) {
 /// Reforged's own files number it, between PRE2 and RIBB, which is also where
 /// 3.0's chunk table reads it. `Camera` and `Wc3FaceFx` have no node chunk and
 /// so no id, and answer -1. @p kind is what the node is WRITTEN as
-/// (`WrittenKind`), so a system the profile does not carry ranks as the helper
+/// (`WrittenKind`), so a system the file has no record for ranks as the helper
 /// it becomes.
 int ChunkRank(NodeKind kind) {
     switch (kind) {
@@ -740,12 +742,10 @@ int ChunkRank(NodeKind kind) {
     case NodeKind::Wc3ParticleEmitter1:
         return 4;
     case NodeKind::Wc3ParticleEmitter2:
-    case NodeKind::ParticleEmitter: // written as a PRE2
         return 5;
     case NodeKind::Wc3CornEmitter:
         return 6;
     case NodeKind::Wc3RibbonEmitter:
-    case NodeKind::RibbonEmitter:
         return 7;
     case NodeKind::Event:
         return 8;
@@ -753,6 +753,8 @@ int ChunkRank(NodeKind kind) {
         return 9;
     case NodeKind::Camera:
     case NodeKind::Wc3FaceFx:
+    case NodeKind::ParticleEmitter: // these two are helpers by `WrittenKind`
+    case NodeKind::RibbonEmitter:
     case NodeKind::Sc2ParticleEmitter:
     case NodeKind::Sc2RibbonEmitter:
     case NodeKind::M2ParticleEmitter: // crossed to a PRE2 before export, or a helper
@@ -766,12 +768,22 @@ int ChunkRank(NodeKind kind) {
 
 constexpr int kLastChunkRank = 9;
 
+/// Whether @p kind is an emitter that is a placement and a reference to a
+/// system the document does not hold: a Diablo III bone's particle, an M2
+/// ribbon. Every profile carries the kind, and MDX has no record for it -- a
+/// `PRE2` names a texture and a `RIBB` a material, which the game indexes
+/// unchecked, and the reference is neither.
+bool IsForeignEmitter(NodeKind kind) {
+    return kind == NodeKind::ParticleEmitter || kind == NodeKind::RibbonEmitter;
+}
+
 /// What @p kind is written as under @p profile: itself when the profile carries
-/// it, and otherwise its placement alone -- a helper (§10.9). A StarCraft II
-/// particle system in a Warcraft III export keeps the node its children hang
-/// off and loses the system Warcraft III cannot run.
+/// it and the file has a record for it, and otherwise its placement alone -- a
+/// helper (§10.9). A StarCraft II particle system in a Warcraft III export
+/// keeps the node its children hang off and loses the system Warcraft III
+/// cannot run.
 NodeKind WrittenKind(NodeKind kind, ProfileId profile) {
-    return CarriesNodeKind(profile, kind) ? kind : NodeKind::Helper;
+    return CarriesNodeKind(profile, kind) && !IsForeignEmitter(kind) ? kind : NodeKind::Helper;
 }
 
 /// Feeds one geoset's skinning into @p builder.
@@ -962,54 +974,6 @@ void KeyCameraRests(const Model& model, const mdx_anim::ExportContext& context, 
     }
 }
 
-/// Warcraft III sizes an emitter's particle pool as `rate × 1.15 × lifespan`
-/// cast to unsigned (`CParticleEmitter{,2}::SyncAllocation`), so a negative
-/// rate or lifespan, static or keyed, asks for four billion particles and the
-/// game dies on the model. World of Warcraft reads a negative rate as "emit
-/// nothing", which 0 says here too.
-void ClampEmitterPools(mdx::Model& out, Diagnostics& diagnostics) {
-    bool clamped = false;
-    const auto atLeastZero = [&clamped](f32& value) {
-        if (!std::isfinite(value) || value < 0.0f) {
-            value = 0.0f;
-            clamped = true;
-        }
-    };
-    const auto trackAtLeastZero = [&atLeastZero](mdx::Track<f32>& track) {
-        if (mdx::isSmoothInterpolation(track.interpolationType)) {
-            for (auto& key : track.tangentKeys()) {
-                atLeastZero(key.value);
-            }
-        } else {
-            for (f32& key : track.keys()) {
-                atLeastZero(key);
-            }
-        }
-    };
-    const auto report = [&](const mdx::Node& node) {
-        if (clamped) {
-            diagnostics.info(DiagCode::AnimTrackApproximated,
-                             "particle emitter '" + node.name +
-                                 "': a negative emission rate or lifespan was written as 0, "
-                                 "which is all Warcraft III can take");
-        }
-        clamped = false;
-    };
-    for (mdx::ParticleEmitter2& emitter : out.particleEmitters2) {
-        atLeastZero(emitter.emissionRate);
-        atLeastZero(emitter.lifespan);
-        trackAtLeastZero(emitter.emissionRateTracks);
-        report(emitter.node);
-    }
-    for (mdx::ParticleEmitter& emitter : out.particleEmitters) {
-        atLeastZero(emitter.emissionRate);
-        atLeastZero(emitter.lifespan);
-        trackAtLeastZero(emitter.emissionRateTracks);
-        trackAtLeastZero(emitter.lifespanTracks);
-        report(emitter.node);
-    }
-}
-
 /// The geoset animations' flags words and the bones' links to them, written
 /// once every record exists (EDIT_MODE_MESH_DESIGN.md §7.6). A bone's link is
 /// derived from its `gateMesh` rather than carried: the table the file's raw
@@ -1038,7 +1002,10 @@ void LinkGeosetAnimations(const Model& model, const mdx_anim::ExportContext& con
     };
 
     // A mesh a bone gates gets a record whatever else it carries: the game
-    // reads that record's flags through the bone.
+    // reads that record's flags through the bone. A flags word does not make
+    // one by itself. The game reads one bit of the word, `DropShadow`, and
+    // that through a bone; a record made only to carry the rest states nothing
+    // (the 746 of 3,106 that the corpus's exports once held).
     std::vector<u8> gated(model.meshes.size(), 0);
     for (std::size_t i = 0; i < model.nodes.size(); ++i) {
         if (gateOf(i) < gated.size()) {
@@ -1057,7 +1024,7 @@ void LinkGeosetAnimations(const Model& model, const mdx_anim::ExportContext& con
                 section != nullptr ? section->native.find(kGeosetAnimFlags) : nullptr;
             const bool shadow =
                 section != nullptr && hasFlag(section->flags, SectionFlags::ProjectedShadow);
-            const bool needed = word != nullptr || shadow || (gated[m] != 0 && k == 0);
+            const bool needed = shadow || (gated[m] != 0 && k == 0);
             const u32 r = recordOf(context.geosetsOfMesh[m][k], needed);
             if (r == kInvalidIndex) {
                 continue;
@@ -1145,64 +1112,8 @@ std::string FaceFxActorPath(const Model& model) {
 }
 
 // ============================================================================
-// MdxExportMapOf
+// MdxLayerMapOf (`MdxExportMapOf` is with the geosets it counts, below)
 // ============================================================================
-
-MdxExportMap MdxExportMapOf(const Document& document, u32 model, ProfileId profile) {
-    MdxExportMap map;
-    if (model >= document.models.size()) {
-        return map;
-    }
-
-    // MDX numbers a node by the chunk it lands in, so every bone comes first,
-    // then the lights, then the helpers, in `mdx/writer.cpp`'s emission order.
-    // That is not cosmetic: `MATS` names an object id, and a reader that takes
-    // one for an index into the bone array gets the right node only while the
-    // bones are 0..n-1. Ours does exactly that (`resolveBoneIdx` asks
-    // `BoneIndexToNodeIndex` first), and so does every other tool, because no
-    // Blizzard file has ever been numbered any other way.
-    //
-    // Numbering in node order interleaved the kinds, which cost nothing until
-    // `RetargetSkeleton` began inserting a shear helper immediately before the
-    // bone it stretches — three of them, in the middle of the bone list. From
-    // then on a StarCraft II model skinned nearly every vertex to a bone three
-    // places off, which is a torn skeleton, not a wrong pose.
-    const auto& nodes = document.models[model].nodes;
-    // A node the profile does not hold is no chunk's (`NodePresenceIn`), and
-    // one standing in for the nodes under it ranks as the helper it becomes.
-    const std::vector<NodePresence> presence = NodePresenceIn(nodes, profile);
-    map.nodeObjectId.assign(nodes.size(), kInvalidIndex);
-    u32 next = 0;
-    for (int rank = 0; rank <= kLastChunkRank; ++rank) {
-        for (std::size_t i = 0; i < nodes.size(); ++i) {
-            // A camera is not a node chunk and carries no id.
-            if (presence[i] != NodePresence::Absent &&
-                ChunkRank(WrittenKind(PresentKind(nodes.nodes[i], presence[i]), profile)) == rank) {
-                map.nodeObjectId[i] = next++;
-            }
-        }
-    }
-    map.clipSequence = mdx_anim::ClipSequences(document, model);
-
-    // One geoset per section the profile draws, in mesh order, and one for a
-    // mesh with none: the render view splits by section and always yields
-    // that many ranges. `toMdx` numbers from this, so the two cannot disagree.
-    const auto& meshes = document.models[model].meshes;
-    map.geosetsOfMesh.resize(meshes.size());
-    map.sectionsOfMesh.resize(meshes.size());
-    u32 geoset = 0;
-    for (std::size_t m = 0; m < meshes.size(); ++m) {
-        const std::size_t count = std::max<std::size_t>(1, meshes[m].sections.size());
-        for (std::size_t k = 0; k < count; ++k) {
-            if (k < meshes[m].sections.size() && !SectionDrawnIn(meshes[m].sections[k], profile)) {
-                continue;
-            }
-            map.geosetsOfMesh[m].push_back(geoset++);
-            map.sectionsOfMesh[m].push_back(static_cast<u32>(k));
-        }
-    }
-    return map;
-}
 
 MdxLayerMap MdxLayerMapOf(const Document& document, u32 model, ProfileId profile,
                           u32 targetVersion) {
@@ -1688,6 +1599,103 @@ GeosetSlice SliceRange(const geom::RenderMesh& render, const geom::RenderRange& 
     return slice;
 }
 
+/// The most vertices one geoset holds. Warcraft III builds no geoset past it:
+/// `CreateGeoset` answers null for a count above 0xFFFF and `BuildAllGeosets`
+/// reads through the answer, so the limit is on the count and 65,536 vertices
+/// is already too many.
+constexpr u32 kMaxGeosetVertices = 0xFFFFu;
+
+/// @p range as the geosets it is written as: itself when its vertex slice fits
+/// one, and otherwise cut, in whole triangles and in face order, into pieces
+/// that each do. The first piece is the section's geoset; `toMdx` writes the
+/// others after every other geoset, so that no number `MdxExportMapOf` gave
+/// moves. One walk for every caller that names a geoset's vertices.
+std::vector<geom::RenderRange> CutToGeosetWidth(const geom::RenderMesh& render,
+                                                const geom::RenderRange& range) {
+    std::vector<geom::RenderRange> pieces;
+    // A slice holds no more vertices than its range has indices.
+    if (range.indexCount <= kMaxGeosetVertices) {
+        pieces.push_back(range);
+        return pieces;
+    }
+    const u32 end =
+        std::min<u32>(range.firstIndex + range.indexCount, static_cast<u32>(render.indices.size()));
+    // Per GPU vertex, the piece that last took it (from 1).
+    std::vector<u32> takenBy(render.vertexCount(), 0);
+    geom::RenderRange piece = range;
+    piece.indexCount = 0;
+    u32 held = 0;
+    u32 mark = 1;
+    for (u32 i = range.firstIndex; i + 2 < end; i += 3) {
+        const auto fresh = [&] {
+            u32 count = 0;
+            for (u32 c = 0; c < 3; ++c) {
+                const u32 source = render.indices[i + c];
+                bool counted = source >= takenBy.size() || takenBy[source] == mark;
+                for (u32 b = 0; b < c && !counted; ++b) {
+                    counted = render.indices[i + b] == source;
+                }
+                count += counted ? 0u : 1u;
+            }
+            return count;
+        };
+        if (held + fresh() > kMaxGeosetVertices) {
+            pieces.push_back(piece);
+            piece.firstIndex = i;
+            piece.indexCount = 0;
+            held = 0;
+            ++mark;
+        }
+        for (u32 c = 0; c < 3; ++c) {
+            const u32 source = render.indices[i + c];
+            if (source < takenBy.size() && takenBy[source] != mark) {
+                takenBy[source] = mark;
+                ++held;
+            }
+        }
+        piece.indexCount += 3;
+    }
+    // Indices past the last whole triangle stay with the last piece.
+    piece.indexCount = end > piece.firstIndex ? end - piece.firstIndex : 0;
+    pieces.push_back(piece);
+    return pieces;
+}
+
+/// `CutToGeosetWidth`, with the word about a range that needed the cut. The
+/// code is the one a merge is refused on (`checkGeoset`).
+std::vector<geom::RenderRange> GeosetPiecesOf(const geom::RenderMesh& render,
+                                              const geom::RenderRange& range, u32 meshIndex,
+                                              Diagnostics& diagnostics) {
+    std::vector<geom::RenderRange> pieces = CutToGeosetWidth(render, range);
+    if (pieces.size() > 1) {
+        diagnostics.info(DiagCode::IndexWidthExceeded,
+                         "section holds more than the 65535 vertices of one geoset; written as " +
+                             std::to_string(pieces.size()) + " geosets",
+                         ElementRef(ElementKind::Mesh, meshIndex));
+    }
+    return pieces;
+}
+
+/// Whether a section of @p mesh could need `CutToGeosetWidth`: only one whose
+/// triangles have more corners than a geoset has vertices. Counted off the
+/// face set, so that asking costs no render view.
+bool MayNeedGeosetCut(const Mesh& mesh) {
+    const geom::FaceSet& faces = mesh.faceSet();
+    if (faces.cornerVertex.size() <= kMaxGeosetVertices) {
+        return false; // the common case, with no per-section count at all
+    }
+    const std::span<const u32> sectionOf = mesh.faceSections();
+    std::vector<u64> corners(std::max<std::size_t>(1, mesh.sections.size()), 0);
+    for (std::size_t f = 0; f < faces.faceValence.size(); ++f) {
+        const u32 valence = faces.faceValence[f];
+        const u32 section =
+            f < sectionOf.size() && sectionOf[f] < corners.size() ? sectionOf[f] : 0;
+        corners[section] += valence >= 3 ? (valence - 2) * 3ull : 0ull;
+    }
+    return std::any_of(corners.begin(), corners.end(),
+                       [](u64 count) { return count > kMaxGeosetVertices; });
+}
+
 /// The WEM vertex of each vertex of @p slice.
 std::vector<u32> WemVerticesOf(const geom::RenderMesh& render, const GeosetSlice& slice) {
     std::vector<u32> vertices;
@@ -2002,7 +2010,7 @@ std::span<const u16> ClassicPinsOf(const Mesh& mesh) {
  *
  * Shared by the export and by `checkGeoset`, so what the check refuses is what
  * the export would have said. @p refused is set when the skin cannot be
- * written as asked.
+ * written as asked. @p range is one of `CutToGeosetWidth`'s pieces.
  */
 mdx::Geoset BuildGeosetFromRange(const Mesh& mesh, u32 meshIndex, const geom::RenderMesh& render,
                                  const GeosetStreams& streams, const geom::RenderRange& range,
@@ -2019,16 +2027,9 @@ mdx::Geoset BuildGeosetFromRange(const Mesh& mesh, u32 meshIndex, const geom::Re
     const GeosetSlice slice = SliceRange(render, range, localOf);
     const std::vector<u32>& sourceOf = slice.sourceOf;
     geoset.faces.reserve(slice.faces.size());
-    bool wide = false;
+    // A range from `CutToGeosetWidth` holds no index a `u16` cannot.
     for (const u32 local : slice.faces) {
-        const u32 index = local == kUnmappedVertex ? 0u : local;
-        wide = wide || index > 0xFFFFu;
-        geoset.faces.push_back(static_cast<u16>(index & 0xFFFFu));
-    }
-    if (wide) {
-        diagnostics.warn(DiagCode::IndexWidthExceeded,
-                         "section needs more than 65535 vertices for one geoset",
-                         ElementRef(ElementKind::Mesh, meshIndex));
+        geoset.faces.push_back(static_cast<u16>(local == kUnmappedVertex ? 0u : local));
     }
     geoset.faceTypeGroups.push_back(4);
     geoset.faceGroups.push_back(static_cast<u32>(geoset.faces.size()));
@@ -2093,11 +2094,105 @@ mdx::Geoset BuildGeosetFromRange(const Mesh& mesh, u32 meshIndex, const geom::Re
     return geoset;
 }
 
+/// The object id `toMdx` gives each node of @p nodes; `kInvalidIndex` for one
+/// with none (`MdxExportMap::nodeObjectId`).
+std::vector<u32> ObjectIdsOf(const NodeTree& nodes, ProfileId profile) {
+    // MDX numbers a node by the chunk it lands in, so every bone comes first,
+    // then the lights, then the helpers, in `mdx/writer.cpp`'s emission order.
+    // That is not cosmetic: `MATS` names an object id, and a reader that takes
+    // one for an index into the bone array gets the right node only while the
+    // bones are 0..n-1. Ours does exactly that (`resolveBoneIdx` asks
+    // `BoneIndexToNodeIndex` first), and so does every other tool, because no
+    // Blizzard file has ever been numbered any other way.
+    //
+    // Numbering in node order interleaved the kinds, which cost nothing until
+    // `RetargetSkeleton` began inserting a shear helper immediately before the
+    // bone it stretches — three of them, in the middle of the bone list. From
+    // then on a StarCraft II model skinned nearly every vertex to a bone three
+    // places off, which is a torn skeleton, not a wrong pose.
+    //
+    // A node the profile does not hold is no chunk's (`NodePresenceIn`), and
+    // one standing in for the nodes under it ranks as the helper it becomes.
+    const std::vector<NodePresence> presence = NodePresenceIn(nodes, profile);
+    std::vector<u32> ids(nodes.size(), kInvalidIndex);
+    u32 next = 0;
+    for (int rank = 0; rank <= kLastChunkRank; ++rank) {
+        for (std::size_t i = 0; i < nodes.size(); ++i) {
+            // A camera is not a node chunk and carries no id.
+            if (presence[i] != NodePresence::Absent &&
+                ChunkRank(WrittenKind(PresentKind(nodes.nodes[i], presence[i]), profile)) == rank) {
+                ids[i] = next++;
+            }
+        }
+    }
+    return ids;
+}
+
+/// The sections of @p mesh a file of @p profile holds a geoset for, in order:
+/// the ones the profile draws, and section 0 for a mesh with none. The render
+/// view splits by section and always yields that many ranges.
+std::vector<u32> DrawnSectionsOf(const Mesh& mesh, ProfileId profile) {
+    std::vector<u32> drawn;
+    const std::size_t count = std::max<std::size_t>(1, mesh.sections.size());
+    for (std::size_t k = 0; k < count; ++k) {
+        if (k >= mesh.sections.size() || SectionDrawnIn(mesh.sections[k], profile)) {
+            drawn.push_back(static_cast<u32>(k));
+        }
+    }
+    return drawn;
+}
+
 } // namespace
 
 // ============================================================================
 // What the file holds for each vertex (EDIT_MODE_SKIN_DESIGN.md §12.3-12.4)
 // ============================================================================
+
+MdxExportMap MdxExportMapOf(const Document& document, u32 model, ProfileId profile,
+                            std::optional<u32> secondUvSet) {
+    MdxExportMap map;
+    if (model >= document.models.size()) {
+        return map;
+    }
+    map.nodeObjectId = ObjectIdsOf(document.models[model].nodes, profile);
+    map.clipSequence = mdx_anim::ClipSequences(document, model);
+
+    // One geoset per section the profile draws, in mesh order, and one for a
+    // mesh with none. `toMdx` numbers from this, so the two cannot disagree.
+    const auto& meshes = document.models[model].meshes;
+    map.geosetsOfMesh.resize(meshes.size());
+    map.sectionsOfMesh.resize(meshes.size());
+    u32 geoset = 0;
+    for (std::size_t m = 0; m < meshes.size(); ++m) {
+        map.sectionsOfMesh[m] = DrawnSectionsOf(meshes[m], profile);
+        for (std::size_t k = 0; k < map.sectionsOfMesh[m].size(); ++k) {
+            map.geosetsOfMesh[m].push_back(geoset++);
+        }
+    }
+    // And, after all of those, the further pieces of a section that holds
+    // more vertices than one geoset can: `toMdx` cuts it (`CutToGeosetWidth`).
+    // Only a section of more indices than that can need the cut, so the view
+    // is built for no other mesh.
+    for (std::size_t m = 0; m < meshes.size(); ++m) {
+        if (!MayNeedGeosetCut(meshes[m])) {
+            continue;
+        }
+        const Mesh& mesh = meshes[m];
+        const geom::RenderMesh render = geom::BuildRenderMesh(
+            mesh, GeosetRenderDesc(SecondUvSetOf(mesh, profile, secondUvSet)));
+        for (const geom::RenderRange& range : render.ranges) {
+            if (range.section < mesh.sections.size() &&
+                !SectionDrawnIn(mesh.sections[range.section], profile)) {
+                continue;
+            }
+            for (std::size_t p = CutToGeosetWidth(render, range).size(); p > 1; --p) {
+                map.geosetsOfMesh[m].push_back(geoset++);
+                map.sectionsOfMesh[m].push_back(range.section);
+            }
+        }
+    }
+    return map;
+}
 
 std::vector<DrawnElements> MdxGeosetElements(const Document& document, u32 model,
                                              ProfileId profile,
@@ -2108,14 +2203,15 @@ std::vector<DrawnElements> MdxGeosetElements(const Document& document, u32 model
     }
     // The sections the profile draws, as `MdxExportMapOf` numbers them; the
     // profile also decides whether a second UV set can split vertices.
-    const MdxExportMap map = MdxExportMapOf(document, model, profile);
     const auto& meshes = document.models[model].meshes;
+    // A section's pieces past its first, which `toMdx` numbers last.
+    std::vector<DrawnElements> late;
     for (std::size_t m = 0; m < meshes.size(); ++m) {
         const Mesh& mesh = meshes[m];
         const geom::RenderMesh render =
             geom::BuildRenderMesh(mesh, GeosetRenderDesc(SecondUvSetOf(mesh, profile, secondUvSet)));
         if (render.ranges.empty()) {
-            out.resize(out.size() + map.geosetsOfMesh[m].size());
+            out.resize(out.size() + DrawnSectionsOf(mesh, profile).size());
             continue;
         }
         std::vector<u32> localOf(render.vertexCount(), kUnmappedVertex);
@@ -2124,24 +2220,29 @@ std::vector<DrawnElements> MdxGeosetElements(const Document& document, u32 model
                 !SectionDrawnIn(mesh.sections[range.section], profile)) {
                 continue;
             }
-            GeosetSlice slice = SliceRange(render, range, localOf);
-            DrawnElements& drawn = out.emplace_back();
-            drawn.vertices = WemVerticesOf(render, slice);
-            drawn.halfedges.reserve(slice.sourceOf.size());
-            for (const u32 source : slice.sourceOf) {
-                drawn.halfedges.push_back(source < render.vertexToWemHalfedge.size()
-                                              ? render.vertexToWemHalfedge[source]
-                                              : geom::HalfedgeId());
+            const std::vector<geom::RenderRange> pieces = CutToGeosetWidth(render, range);
+            for (std::size_t p = 0; p < pieces.size(); ++p) {
+                GeosetSlice slice = SliceRange(render, pieces[p], localOf);
+                DrawnElements& drawn = (p == 0 ? out : late).emplace_back();
+                drawn.vertices = WemVerticesOf(render, slice);
+                drawn.halfedges.reserve(slice.sourceOf.size());
+                for (const u32 source : slice.sourceOf) {
+                    drawn.halfedges.push_back(source < render.vertexToWemHalfedge.size()
+                                                  ? render.vertexToWemHalfedge[source]
+                                                  : geom::HalfedgeId());
+                }
+                const u32 first = pieces[p].firstIndex / 3;
+                for (u32 t = 0; t < pieces[p].indexCount / 3; ++t) {
+                    drawn.triangleFaces.push_back(first + t < render.triangleFace.size()
+                                                      ? render.triangleFace[first + t]
+                                                      : kUnmappedVertex);
+                }
+                drawn.triangles = std::move(slice.faces);
             }
-            const u32 first = range.firstIndex / 3;
-            for (u32 t = 0; t < range.indexCount / 3; ++t) {
-                drawn.triangleFaces.push_back(first + t < render.triangleFace.size()
-                                                  ? render.triangleFace[first + t]
-                                                  : kUnmappedVertex);
-            }
-            drawn.triangles = std::move(slice.faces);
         }
     }
+    out.insert(out.end(), std::make_move_iterator(late.begin()),
+               std::make_move_iterator(late.end()));
     return out;
 }
 
@@ -2169,12 +2270,11 @@ WrittenSkin MdxConverter::writtenSkin(const Document& document, u32 model, Profi
     }
     const Model& owner = document.models[model];
     const Mesh& target = owner.meshes[mesh];
-    const MdxExportMap map = MdxExportMapOf(document, model, profile);
-    const std::vector<u32>& objectIdOf = map.nodeObjectId;
+    const std::vector<u32> objectIdOf = ObjectIdsOf(owner.nodes, profile);
     const geom::RenderMesh render =
         geom::BuildRenderMesh(target, GeosetRenderDesc(SecondUvSetOf(target, profile, std::nullopt)));
     if (render.ranges.empty()) {
-        result.geosets.resize(map.geosetsOfMesh[mesh].size());
+        result.geosets.resize(DrawnSectionsOf(target, profile).size());
         return result;
     }
     const SkinSkeleton skeleton(owner.nodes);
@@ -2188,19 +2288,28 @@ WrittenSkin MdxConverter::writtenSkin(const Document& document, u32 model, Profi
                               ClassicPinsOf(target),
                               held};
     std::vector<u32> localOf(render.vertexCount(), kUnmappedVertex);
+    // In `geosetsOfMesh[mesh]`'s order: a section's pieces past its first
+    // come after the mesh's other geosets.
+    std::vector<WrittenGeosetSkin> late;
     for (const geom::RenderRange& range : render.ranges) {
         const MeshSection* section =
             range.section < target.sections.size() ? &target.sections[range.section] : nullptr;
         if (section != nullptr && !SectionDrawnIn(*section, profile)) {
             continue;
         }
-        result.geosets.push_back(GeosetSkin(context, section,
-                                            WemVerticesOf(render, SliceRange(render, range, localOf)),
-                                            result.overLimit));
-        if (result.classic) {
-            ReportClassic(result.geosets.back().classic, mesh, result.diagnostics);
+        const std::vector<geom::RenderRange> pieces = CutToGeosetWidth(render, range);
+        for (std::size_t p = 0; p < pieces.size(); ++p) {
+            std::vector<WrittenGeosetSkin>& into = p == 0 ? result.geosets : late;
+            into.push_back(GeosetSkin(context, section,
+                                      WemVerticesOf(render, SliceRange(render, pieces[p], localOf)),
+                                      result.overLimit));
+            if (result.classic) {
+                ReportClassic(into.back().classic, mesh, result.diagnostics);
+            }
         }
     }
+    result.geosets.insert(result.geosets.end(), std::make_move_iterator(late.begin()),
+                          std::make_move_iterator(late.end()));
     ReportInfluenceLimit(result.overLimit, result.classic, mesh, result.diagnostics);
     return result;
 }
@@ -2217,7 +2326,7 @@ Diagnostics MdxConverter::checkGeoset(const Document& document, u32 model, const
         return out;
     }
     const Model& owner = document.models[model];
-    const std::vector<u32> objectIdOf = MdxExportMapOf(document, model, profile).nodeObjectId;
+    const std::vector<u32> objectIdOf = ObjectIdsOf(owner.nodes, profile);
     const std::optional<u32> secondUvSet = SecondUvSetOf(mesh, profile, std::nullopt);
     const geom::RenderMesh render = geom::BuildRenderMesh(mesh, GeosetRenderDesc(secondUvSet));
     out.append(render.diagnostics);
@@ -2236,11 +2345,13 @@ Diagnostics MdxConverter::checkGeoset(const Document& document, u32 model, const
     u32 overLimit = 0;
     bool refused = false;
     for (const geom::RenderRange& range : render.ranges) {
-        const mdx::Geoset geoset =
-            BuildGeosetFromRange(mesh, kInvalidIndex, render, streams, range, localOf, skin,
-                                 targetVersion, overLimit, refused, out);
-        if (writtenVertices != nullptr) {
-            *writtenVertices += static_cast<u32>(geoset.vertexPositions.size());
+        for (const geom::RenderRange& piece : GeosetPiecesOf(render, range, kInvalidIndex, out)) {
+            const mdx::Geoset geoset =
+                BuildGeosetFromRange(mesh, kInvalidIndex, render, streams, piece, localOf, skin,
+                                     targetVersion, overLimit, refused, out);
+            if (writtenVertices != nullptr) {
+                *writtenVertices += static_cast<u32>(geoset.vertexPositions.size());
+            }
         }
     }
     ReportInfluenceLimit(overLimit, skin.classic, kInvalidIndex, out);
@@ -2471,6 +2582,22 @@ Result<mdx::Model> MdxConverter::toMdx(const Document& document, ProfileId profi
         result.value->version = targetVersion;
         return result;
     }
+    // The profile carries these two kinds, so the check above is silent about
+    // them, and the file still has no record for one (`IsForeignEmitter`).
+    for (const NodeKind kind : {NodeKind::ParticleEmitter, NodeKind::RibbonEmitter}) {
+        const auto& nodes = document.models.front().nodes.nodes;
+        const auto foreign = std::count_if(nodes.begin(), nodes.end(), [kind](const Node& node) {
+            return node.kind == kind && !node.removed;
+        });
+        if (foreign != 0) {
+            result.diagnostics.info(DiagCode::NodeKindNotCarried,
+                                    std::to_string(foreign) + " " + ToString(kind) +
+                                        " nodes name a system the document does not hold, and an "
+                                        ".mdx has no record for that; only their placement is "
+                                        "written, as helpers",
+                                    ElementRef(ElementKind::Document, 0), profile);
+        }
+    }
 
     Diagnostics& diagnostics = result.diagnostics;
     const Model& model = document.models.front();
@@ -2510,7 +2637,9 @@ Result<mdx::Model> MdxConverter::toMdx(const Document& document, ProfileId profi
     for (std::size_t t = 0; t < document.textures.size(); ++t) {
         const TextureRef& ref = document.textures[t];
         mdx::Texture texture;
-        texture.fileName = ref.path;
+        // An HD file names a stock neutral one way, whichever container the
+        // document's source spelled.
+        texture.fileName = IsWc3Hd(profile) ? mdx_core::StockSpelling(ref.path) : ref.path;
         // `TextureRef::flags` is MDX's own wrap word only when an `.mdx` put it
         // there; for every other source it is empty and means nothing, so the
         // materials say what the texture is sampled with (`TextureWrapBits`).
@@ -2548,7 +2677,7 @@ Result<mdx::Model> MdxConverter::toMdx(const Document& document, ProfileId profi
     // The numbering, and the sequence each clip becomes, are `MdxExportMap`'s,
     // so a caller that asks where a node or clip went gets this export's answer.
     // A camera has no id (`kInvalidIndex`, which is also `NO_PARENT`).
-    const MdxExportMap exportMap = MdxExportMapOf(document, 0, profile);
+    const MdxExportMap exportMap = MdxExportMapOf(document, 0, profile, drawnSecondUvSet);
     const std::vector<u32>& objectIdOf = exportMap.nodeObjectId;
     animContext.clipSequence = exportMap.clipSequence;
     // What the profile's masks leave of each node: the map numbered from the
@@ -2728,8 +2857,9 @@ Result<mdx::Model> MdxConverter::toMdx(const Document& document, ProfileId profi
         case NodeKind::Attachment: {
             mdx::Attachment attachment;
             attachment.node = buildNode(i);
-            // The id its file gave it, or its place in ATCH; the chunk's ids
-            // are checked as a whole under this loop.
+            // The id its file gave it, or its place in ATCH. Whether the
+            // chunk's ids climb, as the game needs, is the loader's rule and
+            // is repaired with the others (`mdx::makeLoadable`).
             attachment.attachmentId = static_cast<u32>(out.attachments.size());
             if (const auto* id = node.native.find("mdxAttachmentId")) {
                 attachment.attachmentId = static_cast<u32>(id->value);
@@ -2862,33 +2992,6 @@ Result<mdx::Model> MdxConverter::toMdx(const Document& document, ProfileId profi
             out.cornEmitters.push_back(std::move(emitter));
             break;
         }
-        case NodeKind::ParticleEmitter: {
-            mdx::ParticleEmitter2 emitter;
-            emitter.node = buildNode(i);
-            if (const auto* payload = std::get_if<ParticlePayload>(&node.payload)) {
-                if (payload->system.id != AssetKey::kNoId) {
-                    emitter.textureId = payload->system.id;
-                }
-            }
-            claim(i, mdx_anim::ExportContext::Slot::ParticleEmitter2, out.particleEmitters2.size());
-            out.particleEmitters2.push_back(std::move(emitter));
-            break;
-        }
-        case NodeKind::RibbonEmitter: {
-            mdx::RibbonEmitter emitter;
-            emitter.node = buildNode(i);
-            if (const auto* payload = std::get_if<RibbonPayload>(&node.payload)) {
-                if (payload->system.id != AssetKey::kNoId) {
-                    emitter.materialId = payload->system.id;
-                }
-            }
-            if (const auto* slot = node.native.find("textureSlot")) {
-                emitter.textureSlot = static_cast<u32>(slot->value);
-            }
-            claim(i, mdx_anim::ExportContext::Slot::RibbonEmitter, out.ribbonEmitters.size());
-            out.ribbonEmitters.push_back(std::move(emitter));
-            break;
-        }
         case NodeKind::Event: {
             mdx::EventObject event;
             event.node = buildNode(i);
@@ -2909,20 +3012,51 @@ Result<mdx::Model> MdxConverter::toMdx(const Document& document, ProfileId profi
                     shape.radius = payload->shape.sphere.radius;
                     shape.vertices.push_back(payload->shape.sphere.center);
                     break;
-                // Both carry two vertices, which import reads into the box's
-                // corners; a chunk written without them is one every reader
-                // misparses from there on.
+                // The file keeps a plane's two spans and nothing of where it
+                // lies (`mdx::CollisionShape`), which the corners state.
                 case CollisionShapeKind::Plane:
                     shape.type = mdx::CollisionShape::ShapeType::Plane;
                     shape.vertices.push_back(payload->shape.box.minimum);
                     shape.vertices.push_back(payload->shape.box.maximum);
                     break;
-                case CollisionShapeKind::Cylinder:
-                    shape.type = mdx::CollisionShape::ShapeType::Cylinder;
-                    shape.vertices.push_back(payload->shape.box.minimum);
-                    shape.vertices.push_back(payload->shape.box.maximum);
-                    shape.radius = payload->shape.sphere.radius;
+                case CollisionShapeKind::Cylinder: {
+                    // Its two end centres. The file stands a cylinder on Z --
+                    // a base, a height and a radius -- so one that leans has
+                    // no spelling there and is written as the box around it.
+                    Vector3f base = payload->shape.box.minimum;
+                    Vector3f top = payload->shape.box.maximum;
+                    if (top.z < base.z) {
+                        std::swap(base, top);
+                    }
+                    const f32 radius = payload->shape.sphere.radius;
+                    const Vector3f axis = top - base;
+                    const f32 slack = 1e-4f * std::max(1.0f, axis.z);
+                    if (std::abs(axis.x) <= slack && std::abs(axis.y) <= slack) {
+                        shape.type = mdx::CollisionShape::ShapeType::Cylinder;
+                        shape.vertices.push_back(base);
+                        shape.vertices.push_back(Vector3f(base.x, base.y, top.z));
+                        shape.radius = radius;
+                        break;
+                    }
+                    diagnostics.warn(DiagCode::FeatureDropped,
+                                     "collision cylinder '" + node.name +
+                                         "' does not stand on Z, the one axis Warcraft III gives "
+                                         "a cylinder; written as the box around it",
+                                     ElementRef(ElementKind::Node, static_cast<u32>(i)));
+                    const f32 length = axis.length();
+                    Vector3f lo;
+                    Vector3f hi;
+                    for (int a = 0; a < 3; ++a) {
+                        const f32 along = axis.data[a] / length;
+                        const f32 reach = radius * std::sqrt(std::max(0.0f, 1.0f - along * along));
+                        lo.data[a] = std::min(base.data[a], top.data[a]) - reach;
+                        hi.data[a] = std::max(base.data[a], top.data[a]) + reach;
+                    }
+                    shape.type = mdx::CollisionShape::ShapeType::Box;
+                    shape.vertices.push_back(lo);
+                    shape.vertices.push_back(hi);
                     break;
+                }
                 case CollisionShapeKind::Capsule:
                 case CollisionShapeKind::Hull:
                     diagnostics.warn(DiagCode::FeatureDropped,
@@ -2950,24 +3084,6 @@ Result<mdx::Model> MdxConverter::toMdx(const Document& document, ProfileId profi
             break;
         }
         }
-    }
-
-    // The game sizes its id table by the LAST record's id, fills it by every
-    // record's, and hangs a model only on an id inside it (`ProcessAttachments`,
-    // `SpriteAddLink`). An id is a handle the name search returns and nothing
-    // outside the file states one, so a chunk whose ids do not climb -- as its
-    // file wrote them, or after an edit -- is numbered by place, as Blizzard's
-    // files are.
-    if (std::adjacent_find(out.attachments.begin(), out.attachments.end(),
-                           [](const mdx::Attachment& a, const mdx::Attachment& b) {
-                               return a.attachmentId >= b.attachmentId;
-                           }) != out.attachments.end()) {
-        for (std::size_t a = 0; a < out.attachments.size(); ++a) {
-            out.attachments[a].attachmentId = static_cast<u32>(a);
-        }
-        diagnostics.info(DiagCode::Unspecified,
-                         "the attachment ids did not climb through the file, which Warcraft III "
-                         "needs to find them all; numbered by place");
     }
 
     // --- materials ----------------------------------------------------------
@@ -3045,8 +3161,19 @@ Result<mdx::Model> MdxConverter::toMdx(const Document& document, ProfileId profi
         if (IsWc3Hd(profile)) {
             layer.shader = mdx::Layer::ShaderType::SDOnHD;
         }
-        layer.textureId = context.stockBase + static_cast<u32>(stockTextures.size());
+        const u32 blank = context.stockBase + static_cast<u32>(stockTextures.size());
         stockTextures.push_back(mdx::Texture{});
+        // Where a layer of this version keeps its texture: from v1100 the game
+        // reads the list alone (`ReadBinLayer`), and a layer with none there
+        // draws with no texture at all (`mdx_core`'s `placeTexturesForVersion`).
+        if (targetVersion >= 1100) {
+            mdx::Layer::SubTexture sub;
+            sub.textureId = blank;
+            sub.slot = mdx::Layer::SlotType::DiffuseMap;
+            layer.subTextures.push_back(std::move(sub));
+        } else {
+            layer.textureId = blank;
+        }
         mdx::Material material;
         material.layers.push_back(std::move(layer));
         out.materials.push_back(std::move(material));
@@ -3080,6 +3207,14 @@ Result<mdx::Model> MdxConverter::toMdx(const Document& document, ProfileId profi
     // Numbered by the export map, which is what a host marks geosets through.
     animContext.geosetsOfMesh = exportMap.geosetsOfMesh;
     animContext.sectionOfGeoset.assign(model.meshes.size(), {});
+    // A section past one geoset's vertices is several (`CutToGeosetWidth`), and
+    // the ones after its first are held back until every other geoset is in.
+    struct LatePiece {
+        mdx::Geoset geoset;
+        std::size_t mesh = 0;
+        u32 section = 0;
+    };
+    std::vector<LatePiece> latePieces;
     // The geosets a hidden or tinted section produced, turned into geoset
     // animations once every geoset exists.
     std::vector<u32> hiddenGeosets;
@@ -3151,12 +3286,20 @@ Result<mdx::Model> MdxConverter::toMdx(const Document& document, ProfileId profi
             if (section != nullptr && !SectionDrawnIn(*section, profile)) {
                 continue;
             }
-            mdx::Geoset geoset =
-                BuildGeosetFromRange(mesh, static_cast<u32>(m), render, streams, range, localOf,
-                                     skin, targetVersion, overLimit, refused, diagnostics);
-            takeSection(geoset, section);
-            animContext.sectionOfGeoset[m].push_back(range.section);
-            out.geosets.push_back(std::move(geoset));
+            const std::vector<geom::RenderRange> pieces =
+                GeosetPiecesOf(render, range, static_cast<u32>(m), diagnostics);
+            for (std::size_t p = 0; p < pieces.size(); ++p) {
+                mdx::Geoset geoset = BuildGeosetFromRange(
+                    mesh, static_cast<u32>(m), render, streams, pieces[p], localOf, skin,
+                    targetVersion, overLimit, refused, diagnostics);
+                if (p != 0) {
+                    latePieces.push_back({std::move(geoset), m, range.section});
+                    continue;
+                }
+                takeSection(geoset, section);
+                animContext.sectionOfGeoset[m].push_back(range.section);
+                out.geosets.push_back(std::move(geoset));
+            }
         }
         ReportInfluenceLimit(overLimit, classic, static_cast<u32>(m), diagnostics);
     }
@@ -3164,6 +3307,41 @@ Result<mdx::Model> MdxConverter::toMdx(const Document& document, ProfileId profi
     // a file that binds the wrong bones is worse than none.
     if (refused) {
         return result;
+    }
+    // The held pieces, numbered as they land. Each is its section's geoset as
+    // much as the first: the section's material, tint and tracks are its own,
+    // which its place in the mesh's list is what gives it (`mdx_anim`). The
+    // bone gate stays on the first (`LinkGeosetAnimations`).
+    for (std::size_t m = 0; m < model.meshes.size(); ++m) {
+        animContext.geosetsOfMesh[m].resize(animContext.sectionOfGeoset[m].size());
+    }
+    for (LatePiece& piece : latePieces) {
+        const Mesh& mesh = model.meshes[piece.mesh];
+        animContext.geosetsOfMesh[piece.mesh].push_back(static_cast<u32>(out.geosets.size()));
+        animContext.sectionOfGeoset[piece.mesh].push_back(piece.section);
+        takeSection(piece.geoset,
+                    piece.section < mesh.sections.size() ? &mesh.sections[piece.section] : nullptr);
+        out.geosets.push_back(std::move(piece.geoset));
+    }
+
+    // A model whose own extent says nothing -- all zero, inside out, or not a
+    // number -- takes the box its geosets fill. The game culls and frames by
+    // it (`MdlReadLoadExtents`), and the sequences below fall back on it.
+    if (!mdx_anim::HasExtent(model.bounds)) {
+        Extent filled;
+        ResetExtent(filled);
+        bool any = false;
+        for (const mdx::Geoset& geoset : out.geosets) {
+            if (!geoset.vertexPositions.empty()) {
+                GrowExtent(filled, geoset.extent.minimum);
+                GrowExtent(filled, geoset.extent.maximum);
+                any = true;
+            }
+        }
+        if (any) {
+            FinishExtent(filled);
+        }
+        out.modelExtent = any ? FromExtent(filled) : mdx::Extent{};
     }
 
     // A hidden section becomes a static alpha of zero, which is the only
@@ -3205,7 +3383,6 @@ Result<mdx::Model> MdxConverter::toMdx(const Document& document, ProfileId profi
     // And after it, because the keyed records are only now all made.
     LinkGeosetAnimations(model, animContext, out, diagnostics);
     KeyCameraRests(model, animContext, out);
-    ClampEmitterPools(out, diagnostics);
 
     result.value = std::move(out);
     return result;
@@ -3252,6 +3429,41 @@ Result<Document> MdxConverter::importFromBytes(std::span<const u8> data) const {
     return result;
 }
 
+void FinishMdxExport(mdx::Model& model, Diagnostics& out) {
+    const ElementRef whole(ElementKind::Document, 0);
+    const mdx::PruneReport pruned = mdx::pruneModel(model);
+    const auto said = [&](u32 count, DiagCode code, const char* what) {
+        if (count != 0) {
+            out.info(code, std::to_string(count) + what, whole);
+        }
+    };
+    said(pruned.boneLinks, DiagCode::Unspecified,
+         " bone(s) followed a geoset animation that is always visible; unlinked");
+    said(pruned.geosetAnimations, DiagCode::Unspecified,
+         " geoset animation(s) that state nothing left out");
+    said(pruned.geosets, DiagCode::Unspecified, " geoset(s) with no faces left out");
+    said(pruned.materialsUnused, DiagCode::MaterialSlotUnused,
+         " material(s) nothing draws with left out");
+    said(pruned.materialsMerged, DiagCode::MaterialSlotUnused,
+         " material(s) identical to another left out");
+    said(pruned.globalSequences, DiagCode::Unspecified,
+         " global sequence(s) no track runs on left out");
+    if (pruned.linksPastByte != 0) {
+        out.warn(DiagCode::Unspecified,
+                 std::to_string(pruned.linksPastByte) +
+                     " geoset animation(s) that bones follow are past the 255 Warcraft III can "
+                     "link; the bones that follow them are never hidden",
+                 whole);
+    }
+    for (const mdx::LoadFinding& finding : mdx::makeLoadable(model).findings) {
+        if (finding.repaired) {
+            out.info(DiagCode::Unspecified, mdx::describe(finding), whole);
+        } else {
+            out.warn(DiagCode::Unspecified, mdx::describe(finding), whole);
+        }
+    }
+}
+
 Result<std::vector<u8>> MdxConverter::exportToBytes(const Document& document, ProfileId profile,
                                                     u32 version) const {
     if (version == 0) {
@@ -3286,7 +3498,9 @@ Result<std::vector<u8>> MdxConverter::exportToBytes(const Document& document, Pr
     if (!converted.ok()) {
         return result;
     }
+    FinishMdxExport(*converted, result.diagnostics);
     mdx::Writer writer;
+    writer.setRepairs(false); // made just above, and said
     result.value = writer.write(*converted);
     return result;
 }
@@ -3590,8 +3804,9 @@ u32 MdxConverter::internStockTexture(Document& document, mdx::Layer::SlotType sl
     const std::string wanted = NormalisedTexturePath(path);
     for (std::size_t i = 0; i < document.textures.size(); ++i) {
         const TextureRef& texture = document.textures[i];
+        // Under any extension: a shipped model's `.blp` is the same neutral.
         if (texture.replaceableId == stock.replaceableId &&
-            NormalisedTexturePath(texture.path) == wanted) {
+            NormalisedTexturePath(mdx_core::StockSpelling(texture.path)) == wanted) {
             return static_cast<u32>(i);
         }
     }

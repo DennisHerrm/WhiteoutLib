@@ -1337,7 +1337,14 @@ private:
                 break;
             }
 
-            if (!cs.vertices.empty()) {
+            // As `MDL::WriteCollisions` spells each: a plane is its two spans
+            // and no vertices, which is all the binary form holds of it.
+            if (cs.type == CollisionShape::ShapeType::Plane) {
+                const Vector3f lo = cs.vertices.size() > 0 ? cs.vertices[0] : Vector3f{};
+                const Vector3f hi = cs.vertices.size() > 1 ? cs.vertices[1] : Vector3f{};
+                line("Length " + fmtFloat(hi.x - lo.x) + ",");
+                line("Width " + fmtFloat(hi.y - lo.y) + ",");
+            } else if (!cs.vertices.empty()) {
                 openBlock("Vertices " + std::to_string(cs.vertices.size()));
                 for (auto& v : cs.vertices) {
                     line(fmtVec3(v) + ",");

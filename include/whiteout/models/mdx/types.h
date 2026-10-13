@@ -259,6 +259,15 @@ constexpr bool isSmoothInterpolation(InterpolationType t) {
     return t == InterpolationType::Hermite || t == InterpolationType::Bezier;
 }
 
+/// A key's time as Warcraft III reads it: signed. `Track::timestamps` holds the
+/// file's bit pattern, and a track may key before 0 -- Blizzard's own
+/// `UndeadCampaign3D` keys its camera from -33 -- so whatever orders times or
+/// measures between them reads them through this, as the game's
+/// `SetSequenceIndices` compares them.
+constexpr i32 keyTime(u32 stored) {
+    return static_cast<i32>(stored);
+}
+
 /**
  * @brief Generic animation track with keyframe data
  *
@@ -290,7 +299,7 @@ struct Track {
     InterpolationType interpolationType = InterpolationType::None; ///< Interpolation type
     u32 globalSequenceId = kNoGlobalSequence; ///< Global sequence ID if applicable
     size_t keyCount = 0;                      ///< Number of keyframes
-    std::vector<u32> timestamps;              ///< Keyframe timestamps (in frames)
+    std::vector<u32> timestamps;              ///< Keyframe times, in milliseconds (see `keyTime`)
     std::vector<T> keys_data;                 ///< @bind rename=keys — Raw keyframe data
 
     /**

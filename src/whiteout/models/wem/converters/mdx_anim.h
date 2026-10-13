@@ -144,6 +144,11 @@ struct ExportContext {
     std::vector<u32> clipSequence;
 };
 
+/// Whether an extent says anything: a box that is the right way out, made of
+/// numbers, and has a volume or a radius. A default-constructed one is all
+/// zeros, and so is what a file writes for "none".
+bool HasExtent(const Extent& extent);
+
 /// Whether @p clip is a global loop: an auto-play clip on a clock that is not
 /// the host play's, which is what a global sequence is.
 bool IsGlobalLoop(const Clip& clip);

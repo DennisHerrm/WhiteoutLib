@@ -105,13 +105,18 @@ bool SliceWindow(const mdx::Track<T>& track, u32 channel, const Window& window, 
     const Interpolation interp = InterpOf(track.interpolationType, ValueTrait<T>::kType);
     const u32 perKey = ValuesPerKey(interp);
     const std::vector<u32>& times = track.timestamps;
+    // Signed (`mdx::keyTime`): read unsigned, a key before 0 is past every
+    // window, and each window of its track kept its two brackets and no key.
+    const auto at = [&times](std::size_t key) {
+        return static_cast<f32>(mdx::keyTime(times[key]));
+    };
 
     std::size_t first = 0;
-    while (first < times.size() && static_cast<f32>(times[first]) < window.start) {
+    while (first < times.size() && at(first) < window.start) {
         ++first;
     }
     std::size_t last = first;
-    while (last < times.size() && static_cast<f32>(times[last]) <= window.end) {
+    while (last < times.size() && at(last) <= window.end) {
         ++last;
     }
     // One before and one after, so the spans at both edges interpolate the
@@ -126,7 +131,7 @@ bool SliceWindow(const mdx::Track<T>& track, u32 channel, const Window& window, 
     out.channel = channel;
     out.interp = interp;
     for (std::size_t k = lo; k < hi; ++k) {
-        out.times.push_back(Seconds(static_cast<f32>(times[k]) - window.start));
+        out.times.push_back(Seconds(at(k) - window.start));
         AppendKey(track, k, perKey, out.values);
     }
     return true;
@@ -142,7 +147,7 @@ SubTrack WholeTrack(const mdx::Track<T>& track, u32 channel) {
     out.channel = channel;
     out.interp = interp;
     for (std::size_t k = 0; k < track.timestamps.size(); ++k) {
-        out.times.push_back(Seconds(static_cast<f32>(track.timestamps[k])));
+        out.times.push_back(Seconds(static_cast<f32>(mdx::keyTime(track.timestamps[k]))));
         AppendKey(track, k, perKey, out.values);
     }
     return out;

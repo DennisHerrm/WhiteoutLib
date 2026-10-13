@@ -1321,6 +1321,13 @@ void convertCollisionShape(const MdlNode& block, Model& model) {
         }
     }
 
+    // The game writes a plane as `Length` and `Width` and no vertices; the two
+    // corners other writers give it are taken as they stand.
+    if (cs.type == CollisionShape::ShapeType::Plane && cs.vertices.empty()) {
+        cs.vertices = {Vector3f(0.0f, 0.0f, 0.0f),
+                       Vector3f(floatProp(block, "Length"), floatProp(block, "Width"), 0.0f)};
+    }
+
     model.collisionShapes.push_back(std::move(cs));
 }
 
